@@ -114,3 +114,71 @@ func (s *S) TestCheckUserAccessWithMultipleUsersOnMultipleTeams(c *gocheck.C) {
 	c.Assert(CheckUserAccess(teams, &punk), gocheck.Equals, true)
 	c.Assert(CheckUserAccess(teams, &one), gocheck.Equals, true)
 }
+
+func (s *S) TestCreateTeam(c *gocheck.C) {
+	one := User{Email: "king@pos.com"}
+	two := User{Email: "reconc@pos.com"}
+	three := User{Email: "song@pos.com"}
+	err := CreateTeam("pos", &one, &two, &three)
+	c.Assert(err, gocheck.IsNil)
+	defer s.conn.Teams().Remove(bson.M{"_id": "pos"})
+	team, err := GetTeam("pos")
+	c.Assert(err, gocheck.IsNil)
+	expectedUsers := []string{"king@pos.com", "reconc@pos.com", "song@pos.com"}
+	c.Assert(team.Users, gocheck.DeepEquals, expectedUsers)
+}
+
+func (s *S) TestCreateTeamDuplicate(c *gocheck.C) {
+	err := CreateTeam("pos")
+	c.Assert(err, gocheck.IsNil)
+	defer s.conn.Teams().Remove(bson.M{"_id": "pos"})
+	err = CreateTeam("pos")
+	c.Assert(err, gocheck.Equals, ErrTeamAlreadyExists)
+}
+
+func (s *S) TestCreateTeamTrimsName(c *gocheck.C) {
+	err := CreateTeam("pos    ")
+	c.Assert(err, gocheck.IsNil)
+	defer s.conn.Teams().Remove(bson.M{"_id": "pos"})
+	_, err = GetTeam("pos")
+	c.Assert(err, gocheck.IsNil)
+}
+
+func (s *S) TestCreateTeamValidation(c *gocheck.C) {
+	var tests = []struct {
+		input string
+		err   error
+	}{
+		{"", ErrInvalidTeamName},
+		{"    ", ErrInvalidTeamName},
+		{"1abc", ErrInvalidTeamName},
+		{"a", ErrInvalidTeamName},
+		{"@abc", ErrInvalidTeamName},
+		{"my team", nil},
+		{"team-1", nil},
+		{"team_1", nil},
+		{"ab", nil},
+		{"Abacaxi", nil},
+		{"tsuru@corp.globo.com", nil},
+	}
+	for _, t := range tests {
+		err := CreateTeam(t.input)
+		if err != t.err {
+			c.Errorf("Is %q valid? Want %v. Got %v.", t.input, t.err, err)
+		}
+		defer s.conn.Teams().Remove(bson.M{"_id": t.input})
+	}
+}
+
+func (s *S) TestGetTeam(c *gocheck.C) {
+	team := Team{Name: "symfonia"}
+	s.conn.Teams().Insert(team)
+	defer s.conn.Teams().RemoveId(team.Name)
+	t, err := GetTeam("symfonia")
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(t.Name, gocheck.Equals, team.Name)
+	c.Assert(t.Users, gocheck.HasLen, 0)
+	t, err = GetTeam("wat")
+	c.Assert(err, gocheck.NotNil)
+	c.Assert(t, gocheck.IsNil)
+}

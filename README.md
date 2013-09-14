@@ -1,6 +1,7 @@
 #Tsuru
 
-[![Build Status](https://secure.travis-ci.org/globocom/tsuru.png?branch=master)](http://travis-ci.org/globocom/tsuru)
+[![Build Status](https://drone.io/github.com/globocom/tsuru/status.png)](https://drone.io/github.com/globocom/tsuru/latest)
+[![Build Status](https://travis-ci.org/globocom/tsuru.png?branch=master)](https://travis-ci.org/globocom/tsuru)
 
 ##What is Tsuru?
 

@@ -4,11 +4,7 @@
 
 package term
 
-import (
-	"syscall"
-)
-
-type Termios syscall.Termios
+import "syscall"
 
 var (
 	TCGETS uintptr = syscall.TCGETS

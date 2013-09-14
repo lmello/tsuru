@@ -24,7 +24,7 @@ func (s *S) TestAppCreateIsRegistered(c *gocheck.C) {
 	manager := buildManager("tsuru")
 	create, ok := manager.Commands["app-create"]
 	c.Assert(ok, gocheck.Equals, true)
-	c.Assert(create, gocheck.FitsTypeOf, &AppCreate{})
+	c.Assert(create, gocheck.FitsTypeOf, AppCreate{})
 }
 
 func (s *S) TestAppRemoveIsRegistered(c *gocheck.C) {
@@ -200,4 +200,18 @@ func (s *S) TestUnsetCNameIsRegistered(c *gocheck.C) {
 	cname, ok := manager.Commands["unset-cname"]
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(cname, gocheck.FitsTypeOf, &tsuru.UnsetCName{})
+}
+
+func (s *S) TestPlatformListIsRegistered(c *gocheck.C) {
+	manager := buildManager("tsuru")
+	plat, ok := manager.Commands["platform-list"]
+	c.Assert(ok, gocheck.Equals, true)
+	c.Assert(plat, gocheck.FitsTypeOf, platformList{})
+}
+
+func (s *S) TestSwapIsRegistered(c *gocheck.C) {
+	manager := buildManager("tsuru")
+	cmd, ok := manager.Commands["swap"]
+	c.Assert(ok, gocheck.Equals, true)
+	c.Assert(cmd, gocheck.FitsTypeOf, swap{})
 }

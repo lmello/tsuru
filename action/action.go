@@ -4,7 +4,11 @@
 
 package action
 
-import "errors"
+import (
+	"errors"
+	"github.com/globocom/tsuru/log"
+	"sync"
+)
 
 // Result is the value returned by Forward. It is used in the call of the next
 // action, and also when rolling back the actions.
@@ -48,6 +52,9 @@ type BWContext struct {
 // Each action should do only one thing, and do it well. All information that
 // is needed to undo the action should be returned by the Forward function.
 type Action struct {
+	// Name is the action name. Used by the log.
+	Name string
+
 	// Function that will be invoked in the forward phase. This value
 	// cannot be nil.
 	Forward Forward
@@ -61,6 +68,9 @@ type Action struct {
 
 	// Result of the action. Stored for use in the backward phase.
 	result Result
+
+	// mutex for the result
+	rMutex sync.Mutex
 }
 
 // Pipeline is a list of actions. Each pipeline is atomic: either all actions
@@ -73,6 +83,13 @@ type Pipeline struct {
 // NewPipeline creates a new pipeline instance with the given list of actions.
 func NewPipeline(actions ...*Action) *Pipeline {
 	return &Pipeline{actions: actions}
+}
+
+func (p *Pipeline) Result() Result {
+	action := p.actions[len(p.actions)-1]
+	action.rMutex.Lock()
+	defer action.rMutex.Unlock()
+	return action.result
 }
 
 // Execute executes the pipeline.
@@ -97,16 +114,20 @@ func (p *Pipeline) Execute(params ...interface{}) error {
 	}
 	fwCtx := FWContext{Params: params}
 	for i, a := range p.actions {
+		log.Printf("[pipeline] running the Forward for the %s action", a.Name)
 		if a.Forward == nil {
 			err = errors.New("All actions must define the forward function.")
 		} else if len(fwCtx.Params) < a.MinParams {
 			err = errors.New("Not enough parameters to call Action.Forward.")
 		} else {
 			r, err = a.Forward(fwCtx)
+			a.rMutex.Lock()
 			a.result = r
+			a.rMutex.Unlock()
 			fwCtx.Previous = r
 		}
 		if err != nil {
+			log.Printf("[pipeline] error running the Forward for the %s action - %s", a.Name, err.Error())
 			p.rollback(i-1, params)
 			return err
 		}
@@ -117,6 +138,7 @@ func (p *Pipeline) Execute(params ...interface{}) error {
 func (p *Pipeline) rollback(index int, params []interface{}) {
 	bwCtx := BWContext{Params: params}
 	for i := index; i >= 0; i-- {
+		log.Printf("[pipeline] running Backward for %s action", p.actions[i].Name)
 		if p.actions[i].Backward != nil {
 			bwCtx.FWResult = p.actions[i].result
 			p.actions[i].Backward(bwCtx)

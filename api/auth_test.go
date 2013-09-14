@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package api
 
 import (
 	"bytes"
@@ -13,6 +13,8 @@ import (
 	"github.com/globocom/tsuru/auth"
 	"github.com/globocom/tsuru/db"
 	"github.com/globocom/tsuru/errors"
+	"github.com/globocom/tsuru/quota"
+	"github.com/globocom/tsuru/testing"
 	"io"
 	"io/ioutil"
 	"labix.org/v2/mgo/bson"
@@ -21,32 +23,40 @@ import (
 	"net/http/httptest"
 	"os"
 	"path"
-	"strconv"
 	"strings"
+	"time"
 )
 
 type AuthSuite struct {
-	team  *auth.Team
-	user  *auth.User
-	token *auth.Token
+	team   *auth.Team
+	user   *auth.User
+	token  *auth.Token
+	server *testing.SMTPServer
 }
 
 var _ = gocheck.Suite(&AuthSuite{})
 
 func (s *AuthSuite) SetUpSuite(c *gocheck.C) {
+	var err error
 	config.Set("database:url", "127.0.0.1:27017")
 	config.Set("database:name", "tsuru_api_auth_test")
 	config.Set("auth:salt", "tsuru-salt")
-	config.Set("auth:token-key", "TSURU-KEY")
 	config.Set("auth:hash-cost", 4)
 	s.createUserAndTeam(c)
 	config.Set("admin-team", s.team.Name)
+	s.server, err = testing.NewSMTPServer()
+	c.Assert(err, gocheck.IsNil)
+	config.Set("smtp:server", s.server.Addr())
+	config.Set("smtp:user", "root")
+	config.Set("smtp:password", "123456")
+	app.Provisioner = testing.NewFakeProvisioner()
 }
 
 func (s *AuthSuite) TearDownSuite(c *gocheck.C) {
 	conn, _ := db.Conn()
 	defer conn.Close()
 	conn.Apps().Database.DropDatabase()
+	s.server.Stop()
 }
 
 func (s *AuthSuite) TearDownTest(c *gocheck.C) {
@@ -56,7 +66,7 @@ func (s *AuthSuite) TearDownTest(c *gocheck.C) {
 	c.Assert(err, gocheck.IsNil)
 	_, err = conn.Teams().RemoveAll(bson.M{"_id": bson.M{"$ne": s.team.Name}})
 	c.Assert(err, gocheck.IsNil)
-	s.user.Password = "123"
+	s.user.Password = "123456"
 	s.user.HashPassword()
 	err = s.user.Update()
 	c.Assert(err, gocheck.IsNil)
@@ -76,18 +86,9 @@ func (s *AuthSuite) createUserAndTeam(c *gocheck.C) {
 }
 
 // starts a new httptest.Server and returns it
-// Also changes git:host, git:port and git:protocol to match the server's url
 func (s *AuthSuite) startGandalfTestServer(h http.Handler) *httptest.Server {
 	ts := httptest.NewServer(h)
-	pieces := strings.Split(ts.URL, "://")
-	protocol := pieces[0]
-	hostPart := strings.Split(pieces[1], ":")
-	port := hostPart[1]
-	host := hostPart[0]
-	config.Set("git:host", host)
-	portInt, _ := strconv.ParseInt(port, 10, 0)
-	config.Set("git:port", portInt)
-	config.Set("git:protocol", protocol)
+	config.Set("git:api-server", ts.URL)
 	return ts
 }
 
@@ -152,10 +153,68 @@ func (s *AuthSuite) TestCreateUserHandlerSavesTheUserInTheDatabase(c *gocheck.C)
 	c.Assert(err, gocheck.IsNil)
 	request.Header.Set("Content-type", "application/json")
 	recorder := httptest.NewRecorder()
-	err = CreateUser(recorder, request)
+	err = createUser(recorder, request)
 	c.Assert(err, gocheck.IsNil)
 	_, err = auth.GetUserByEmail("nobody@globo.com")
 	c.Assert(err, gocheck.IsNil)
+	action := testing.Action{
+		Action: "create-user",
+		User:   "nobody@globo.com",
+	}
+	c.Assert(action, testing.IsRecorded)
+}
+
+func (s *AuthSuite) TestCreateUserQuota(c *gocheck.C) {
+	config.Set("quota:apps-per-user", 1)
+	defer config.Unset("quota:apps-per-user")
+	h := testHandler{}
+	ts := s.startGandalfTestServer(&h)
+	defer ts.Close()
+	b := bytes.NewBufferString(`{"email":"nobody@globo.com","password":"123456"}`)
+	request, err := http.NewRequest("POST", "/users", b)
+	c.Assert(err, gocheck.IsNil)
+	request.Header.Set("Content-type", "application/json")
+	recorder := httptest.NewRecorder()
+	err = createUser(recorder, request)
+	c.Assert(err, gocheck.IsNil)
+	defer quota.Delete("nobody@globo.com")
+	err = quota.Reserve("nobody@globo.com", "something/0")
+	c.Assert(err, gocheck.IsNil)
+	err = quota.Reserve("nobody@globo.com", "something/1")
+	_, ok := err.(*quota.QuotaExceededError)
+	c.Assert(ok, gocheck.Equals, true)
+}
+
+func (s *AuthSuite) TestCreateUserUnlimitedQuota(c *gocheck.C) {
+	h := testHandler{}
+	ts := s.startGandalfTestServer(&h)
+	defer ts.Close()
+	b := bytes.NewBufferString(`{"email":"nobody@globo.com","password":"123456"}`)
+	request, err := http.NewRequest("POST", "/users", b)
+	c.Assert(err, gocheck.IsNil)
+	request.Header.Set("Content-type", "application/json")
+	recorder := httptest.NewRecorder()
+	err = createUser(recorder, request)
+	c.Assert(err, gocheck.IsNil)
+	err = quota.Reserve("nobody@globo.com", "something/0")
+	c.Assert(err, gocheck.Equals, quota.ErrQuotaNotFound)
+}
+
+func (s *AuthSuite) TestCreateUserNegativeQuota(c *gocheck.C) {
+	config.Set("quota:apps-per-user", -20)
+	defer config.Unset("quota:apps-per-user")
+	h := testHandler{}
+	ts := s.startGandalfTestServer(&h)
+	defer ts.Close()
+	b := bytes.NewBufferString(`{"email":"nobody@globo.com","password":"123456"}`)
+	request, err := http.NewRequest("POST", "/users", b)
+	c.Assert(err, gocheck.IsNil)
+	request.Header.Set("Content-type", "application/json")
+	recorder := httptest.NewRecorder()
+	err = createUser(recorder, request)
+	c.Assert(err, gocheck.IsNil)
+	err = quota.Reserve("nobody@globo.com", "something/0")
+	c.Assert(err, gocheck.Equals, quota.ErrQuotaNotFound)
 }
 
 func (s *AuthSuite) TestCreateUserHandlerReturnsStatus201AfterCreateTheUser(c *gocheck.C) {
@@ -167,7 +226,7 @@ func (s *AuthSuite) TestCreateUserHandlerReturnsStatus201AfterCreateTheUser(c *g
 	c.Assert(err, gocheck.IsNil)
 	request.Header.Set("Content-type", "application/json")
 	recorder := httptest.NewRecorder()
-	err = CreateUser(recorder, request)
+	err = createUser(recorder, request)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(recorder.Code, gocheck.Equals, 201)
 }
@@ -179,7 +238,7 @@ func (s *AuthSuite) TestCreateUserHandlerReturnErrorIfReadingBodyFails(c *gochec
 	request.Header.Set("Content-type", "application/json")
 	request.Body.Close()
 	recorder := httptest.NewRecorder()
-	err = CreateUser(recorder, request)
+	err = createUser(recorder, request)
 	c.Assert(err, gocheck.NotNil)
 	c.Assert(err, gocheck.ErrorMatches, "^.*bad file descriptor$")
 }
@@ -190,10 +249,10 @@ func (s *AuthSuite) TestCreateUserHandlerReturnErrorAndBadRequestIfInvalidJSONIs
 	c.Assert(err, gocheck.IsNil)
 	request.Header.Set("Content-type", "application/json")
 	recorder := httptest.NewRecorder()
-	err = CreateUser(recorder, request)
+	err = createUser(recorder, request)
 	c.Assert(err, gocheck.NotNil)
 	c.Assert(err, gocheck.ErrorMatches, "^invalid character.*$")
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 }
@@ -209,29 +268,29 @@ func (s *AuthSuite) TestCreateUserHandlerReturnErrorAndConflictIfItFailsToCreate
 	c.Assert(err, gocheck.IsNil)
 	request.Header.Set("Content-type", "application/json")
 	recorder := httptest.NewRecorder()
-	err = CreateUser(recorder, request)
+	err = createUser(recorder, request)
 	c.Assert(err, gocheck.NotNil)
 	c.Assert(err, gocheck.ErrorMatches, "This email is already registered")
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusConflict)
 }
 
-func (s *AuthSuite) TestCreateUserHandlerReturnsPreconditionFailedIfEmailIsNotValid(c *gocheck.C) {
+func (s *AuthSuite) TestCreateUserHandlerReturnsBadRequestIfEmailIsNotValid(c *gocheck.C) {
 	b := bytes.NewBufferString(`{"email":"nobody","password":"123456"}`)
 	request, err := http.NewRequest("POST", "/users", b)
 	c.Assert(err, gocheck.IsNil)
 	request.Header.Set("Content-type", "application/json")
 	recorder := httptest.NewRecorder()
-	err = CreateUser(recorder, request)
+	err = createUser(recorder, request)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
-	c.Assert(e.Code, gocheck.Equals, http.StatusPreconditionFailed)
+	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 	c.Assert(e.Message, gocheck.Equals, "Invalid email.")
 }
 
-func (s *AuthSuite) TestCreateUserHandlerReturnsPreconditionFailedIfPasswordHasLessThan6CharactersOrMoreThan50Characters(c *gocheck.C) {
+func (s *AuthSuite) TestCreateUserHandlerReturnsBadRequestIfPasswordHasLessThan6CharactersOrMoreThan50Characters(c *gocheck.C) {
 	passwords := []string{"123", strings.Join(make([]string, 52), "-")}
 	for _, password := range passwords {
 		b := bytes.NewBufferString(`{"email":"nobody@globo.com","password":"` + password + `"}`)
@@ -239,11 +298,11 @@ func (s *AuthSuite) TestCreateUserHandlerReturnsPreconditionFailedIfPasswordHasL
 		c.Assert(err, gocheck.IsNil)
 		request.Header.Set("Content-type", "application/json")
 		recorder := httptest.NewRecorder()
-		err = CreateUser(recorder, request)
+		err = createUser(recorder, request)
 		c.Assert(err, gocheck.NotNil)
-		e, ok := err.(*errors.Http)
+		e, ok := err.(*errors.HTTP)
 		c.Assert(ok, gocheck.Equals, true)
-		c.Assert(e.Code, gocheck.Equals, http.StatusPreconditionFailed)
+		c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 		c.Assert(e.Message, gocheck.Equals, "Password length should be least 6 characters and at most 50 characters.")
 	}
 }
@@ -260,7 +319,7 @@ func (s *AuthSuite) TestCreateUserCreatesUserInGandalf(c *gocheck.C) {
 	conn, _ := db.Conn()
 	defer conn.Close()
 	defer conn.Users().Remove(bson.M{"email": "nobody@me.myself"})
-	err = CreateUser(recorder, request)
+	err = createUser(recorder, request)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(h.url[0], gocheck.Equals, "/user")
 	expected := `{"name":"nobody@me.myself","keys":{}}`
@@ -282,15 +341,20 @@ func (s *AuthSuite) TestLoginShouldCreateTokenInTheDatabaseAndReturnItWithinTheR
 	conn, _ := db.Conn()
 	defer conn.Close()
 	err = conn.Users().Find(bson.M{"email": "nobody@globo.com"}).One(&user)
-	var recorderJson map[string]string
+	var recorderJSON map[string]string
 	r, _ := ioutil.ReadAll(recorder.Body)
-	json.Unmarshal(r, &recorderJson)
-	n, err := conn.Tokens().Find(bson.M{"token": recorderJson["token"]}).Count()
+	json.Unmarshal(r, &recorderJSON)
+	n, err := conn.Tokens().Find(bson.M{"token": recorderJSON["token"]}).Count()
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(n, gocheck.Equals, 1)
+	action := testing.Action{
+		Action: "login",
+		User:   u.Email,
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
-func (s *AuthSuite) TestLoginShouldReturnErrorAndBadRequestIfItReceivesAnInvalidJson(c *gocheck.C) {
+func (s *AuthSuite) TestLoginShouldReturnErrorAndBadRequestIfItReceivesAnInvalidJSON(c *gocheck.C) {
 	b := bytes.NewBufferString(`"invalid":"json"]`)
 	request, err := http.NewRequest("POST", "/users/nobody@globo.com/tokens?:email=nobody@globo.com", b)
 	c.Assert(err, gocheck.IsNil)
@@ -299,7 +363,7 @@ func (s *AuthSuite) TestLoginShouldReturnErrorAndBadRequestIfItReceivesAnInvalid
 	err = login(recorder, request)
 	c.Assert(err, gocheck.NotNil)
 	c.Assert(err, gocheck.ErrorMatches, "^Invalid JSON$")
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 }
@@ -313,7 +377,7 @@ func (s *AuthSuite) TestLoginShouldReturnErrorAndBadRequestIfTheJSONDoesNotConta
 	err = login(recorder, request)
 	c.Assert(err, gocheck.NotNil)
 	c.Assert(err, gocheck.ErrorMatches, "^You must provide a password to login$")
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 }
@@ -327,7 +391,7 @@ func (s *AuthSuite) TestLoginShouldReturnErrorAndNotFoundIfTheUserDoesNotExist(c
 	err = login(recorder, request)
 	c.Assert(err, gocheck.NotNil)
 	c.Assert(err, gocheck.ErrorMatches, "^User not found$")
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 }
@@ -343,7 +407,7 @@ func (s *AuthSuite) TestLoginShouldreturnErrorIfThePasswordDoesNotMatch(c *goche
 	err = login(recorder, request)
 	c.Assert(err, gocheck.NotNil)
 	c.Assert(err, gocheck.ErrorMatches, "^Authentication failed, wrong password.$")
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusUnauthorized)
 }
@@ -360,7 +424,7 @@ func (s *AuthSuite) TestLoginShouldReturnErrorAndInternalServerErrorIfReadAllFai
 	c.Assert(err, gocheck.NotNil)
 }
 
-func (s *AuthSuite) TestLoginShouldReturnPreconditionFailedIfEmailIsNotValid(c *gocheck.C) {
+func (s *AuthSuite) TestLoginShouldReturnBadRequestIfEmailIsNotValid(c *gocheck.C) {
 	b := bytes.NewBufferString(`{"password":"123456"}`)
 	request, err := http.NewRequest("POST", "/users/nobody/token?:email=nobody", b)
 	c.Assert(err, gocheck.IsNil)
@@ -368,13 +432,13 @@ func (s *AuthSuite) TestLoginShouldReturnPreconditionFailedIfEmailIsNotValid(c *
 	recorder := httptest.NewRecorder()
 	err = login(recorder, request)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
-	c.Assert(e.Code, gocheck.Equals, http.StatusPreconditionFailed)
+	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 	c.Assert(e.Message, gocheck.Equals, emailError)
 }
 
-func (s *AuthSuite) TestLoginShouldReturnPreconditionFailedWhenPasswordIsInvalid(c *gocheck.C) {
+func (s *AuthSuite) TestLoginShouldReturnBadRequestWhenPasswordIsInvalid(c *gocheck.C) {
 	passwords := []string{"123", strings.Join(make([]string, 52), "-")}
 	u := &auth.User{Email: "me@globo.com", Password: "123"}
 	err := u.Create()
@@ -390,11 +454,23 @@ func (s *AuthSuite) TestLoginShouldReturnPreconditionFailedWhenPasswordIsInvalid
 		recorder := httptest.NewRecorder()
 		err = login(recorder, request)
 		c.Assert(err, gocheck.NotNil)
-		e, ok := err.(*errors.Http)
+		e, ok := err.(*errors.HTTP)
 		c.Assert(ok, gocheck.Equals, true)
-		c.Assert(e.Code, gocheck.Equals, http.StatusPreconditionFailed)
+		c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 		c.Assert(e.Message, gocheck.Equals, passwordError)
 	}
+}
+
+func (s *AuthSuite) TestLogout(c *gocheck.C) {
+	token, err := s.user.CreateToken("123456")
+	c.Assert(err, gocheck.IsNil)
+	request, err := http.NewRequest("DELETE", "/users/tokens", nil)
+	c.Assert(err, gocheck.IsNil)
+	recorder := httptest.NewRecorder()
+	err = logout(recorder, request, token)
+	c.Assert(err, gocheck.IsNil)
+	_, err = auth.GetToken("bearer " + token.Token)
+	c.Assert(err, gocheck.Equals, auth.ErrInvalidToken)
 }
 
 func (s *AuthSuite) TestCreateTeamHandlerSavesTheTeamInTheDatabaseWithTheAuthenticatedUser(c *gocheck.C) {
@@ -403,7 +479,7 @@ func (s *AuthSuite) TestCreateTeamHandlerSavesTheTeamInTheDatabaseWithTheAuthent
 	c.Assert(err, gocheck.IsNil)
 	request.Header.Set("Content-type", "application/json")
 	recorder := httptest.NewRecorder()
-	err = CreateTeam(recorder, request, s.token)
+	err = createTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	t := new(auth.Team)
 	conn, _ := db.Conn()
@@ -412,6 +488,12 @@ func (s *AuthSuite) TestCreateTeamHandlerSavesTheTeamInTheDatabaseWithTheAuthent
 	defer conn.Teams().Remove(bson.M{"_id": "timeredbull"})
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(t, ContainsUser, s.user)
+	action := testing.Action{
+		Action: "create-team",
+		User:   s.user.Email,
+		Extra:  []interface{}{"timeredbull"},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *AuthSuite) TestCreateTeamHandlerReturnsBadRequestIfTheRequestBodyIsAnInvalidJSON(c *gocheck.C) {
@@ -420,9 +502,9 @@ func (s *AuthSuite) TestCreateTeamHandlerReturnsBadRequestIfTheRequestBodyIsAnIn
 	c.Assert(err, gocheck.IsNil)
 	request.Header.Set("Content-type", "application/json")
 	recorder := httptest.NewRecorder()
-	err = CreateTeam(recorder, request, s.token)
+	err = createTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 }
@@ -433,24 +515,12 @@ func (s *AuthSuite) TestCreateTeamHandlerReturnsBadRequestIfTheNameIsNotGiven(c 
 	c.Assert(err, gocheck.IsNil)
 	request.Header.Set("Content-type", "application/json")
 	recorder := httptest.NewRecorder()
-	err = CreateTeam(recorder, request, s.token)
+	err = createTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	c.Assert(err, gocheck.ErrorMatches, "^You must provide the team name$")
-	e, ok := err.(*errors.Http)
+	c.Assert(err.Error(), gocheck.Equals, auth.ErrInvalidTeamName.Error())
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
-}
-
-func (s *AuthSuite) TestCreateTeamHandlerReturnsInternalServerErrorIfReadAllFails(c *gocheck.C) {
-	b := s.getTestData("bodyToBeClosed.txt")
-	err := b.Close()
-	c.Assert(err, gocheck.IsNil)
-	request, err := http.NewRequest("POST", "/teams", b)
-	c.Assert(err, gocheck.IsNil)
-	request.Header.Set("Content-type", "application/json")
-	recorder := httptest.NewRecorder()
-	err = CreateTeam(recorder, request, s.token)
-	c.Assert(err, gocheck.NotNil)
 }
 
 func (s *AuthSuite) TestCreateTeamHandlerReturnConflictIfTheTeamToBeCreatedAlreadyExists(c *gocheck.C) {
@@ -464,12 +534,12 @@ func (s *AuthSuite) TestCreateTeamHandlerReturnConflictIfTheTeamToBeCreatedAlrea
 	c.Assert(err, gocheck.IsNil)
 	request.Header.Set("Content-type", "application/json")
 	recorder := httptest.NewRecorder()
-	err = CreateTeam(recorder, request, s.token)
+	err = createTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusConflict)
-	c.Assert(e, gocheck.ErrorMatches, "^This team already exists$")
+	c.Assert(e, gocheck.ErrorMatches, "^Team already exists$")
 }
 
 func (s *AuthSuite) TestKeyToMap(c *gocheck.C) {
@@ -488,20 +558,26 @@ func (s *AuthSuite) TestRemoveTeam(c *gocheck.C) {
 	request, err := http.NewRequest("DELETE", fmt.Sprintf("/teams/%s?:name=%s", team.Name, team.Name), nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveTeam(recorder, request, s.token)
+	err = removeTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	n, err := conn.Teams().Find(bson.M{"name": team.Name}).Count()
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(n, gocheck.Equals, 0)
+	action := testing.Action{
+		Action: "remove-team",
+		User:   s.user.Email,
+		Extra:  []interface{}{team.Name},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *AuthSuite) TestRemoveTeamGives404WhenTeamDoesNotExist(c *gocheck.C) {
 	request, err := http.NewRequest("DELETE", "/teams/unknown?:name=unknown", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveTeam(recorder, request, s.token)
+	err = removeTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 	c.Assert(e.Message, gocheck.Equals, `Team "unknown" not found.`)
@@ -517,9 +593,9 @@ func (s *AuthSuite) TestRemoveTeamGives404WhenUserDoesNotHaveAccessToTheTeam(c *
 	request, err := http.NewRequest("DELETE", fmt.Sprintf("/teams/%s?:name=%s", team.Name, team.Name), nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveTeam(recorder, request, s.token)
+	err = removeTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 	c.Assert(e.Message, gocheck.Equals, `Team "painofsalvation" not found.`)
@@ -539,9 +615,9 @@ func (s *AuthSuite) TestRemoveTeamGives403WhenTeamHasAccessToAnyApp(c *gocheck.C
 	request, err := http.NewRequest("DELETE", fmt.Sprintf("/teams/%s?:name=%s", team.Name, team.Name), nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveTeam(recorder, request, s.token)
+	err = removeTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
 	expected := `This team cannot be removed because it have access to apps.
@@ -554,7 +630,7 @@ func (s *AuthSuite) TestListTeamsListsAllTeamsThatTheUserIsMember(c *gocheck.C) 
 	request, err := http.NewRequest("GET", "/teams", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = ListTeams(recorder, request, s.token)
+	err = teamList(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	b, err := ioutil.ReadAll(recorder.Body)
 	c.Assert(err, gocheck.IsNil)
@@ -562,6 +638,11 @@ func (s *AuthSuite) TestListTeamsListsAllTeamsThatTheUserIsMember(c *gocheck.C) 
 	err = json.Unmarshal(b, &m)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(m, gocheck.DeepEquals, []map[string]string{{"name": s.team.Name}})
+	action := testing.Action{
+		Action: "list-teams",
+		User:   s.user.Email,
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *AuthSuite) TestListTeamsReturns204IfTheUserHasNoTeam(c *gocheck.C) {
@@ -577,7 +658,7 @@ func (s *AuthSuite) TestListTeamsReturns204IfTheUserHasNoTeam(c *gocheck.C) {
 	request, err := http.NewRequest("GET", "/teams", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = ListTeams(recorder, request, token)
+	err = teamList(recorder, request, token)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(recorder.Code, gocheck.Equals, http.StatusNoContent)
 }
@@ -595,13 +676,19 @@ func (s *AuthSuite) TestAddUserToTeam(c *gocheck.C) {
 	request, err := http.NewRequest("PUT", url, nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = AddUserToTeam(recorder, request, s.token)
+	err = addUserToTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	t := new(auth.Team)
 	err = conn.Teams().Find(bson.M{"_id": "tsuruteam"}).One(t)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(t, ContainsUser, s.user)
 	c.Assert(t, ContainsUser, u)
+	action := testing.Action{
+		Action: "add-user-to-team",
+		User:   s.user.Email,
+		Extra:  []interface{}{"team=tsuruteam", "user=" + u.Email},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *AuthSuite) TestAddUserToTeamShouldReturnNotFoundIfThereIsNoTeamWithTheGivenName(c *gocheck.C) {
@@ -611,9 +698,9 @@ func (s *AuthSuite) TestAddUserToTeamShouldReturnNotFoundIfThereIsNoTeamWithTheG
 	request, err := http.NewRequest("PUT", "/teams/abc/me@me.me?:team=abc&:user=me@me.me", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = AddUserToTeam(recorder, request, s.token)
+	err = addUserToTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 	c.Assert(e, gocheck.ErrorMatches, "^Team not found$")
@@ -635,9 +722,9 @@ func (s *AuthSuite) TestAddUserToTeamShouldReturnUnauthorizedIfTheGivenUserIsNot
 	request, err := http.NewRequest("PUT", "/teams/tsuruteam/hi@me.me?:team=tsuruteam&:user=hi@me.me", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = AddUserToTeam(recorder, request, token)
+	err = addUserToTeam(recorder, request, token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusUnauthorized)
 	c.Assert(e, gocheck.ErrorMatches, "^You are not authorized to add new users to the team tsuruteam$")
@@ -650,9 +737,9 @@ func (s *AuthSuite) TestAddUserToTeamShouldReturnNotFoundIfTheEmailInTheBodyDoes
 	request, err := http.NewRequest("PUT", "/teams/tsuruteam/hi2@me.me?:team=tsuruteam&:user=hi2@me.me", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = AddUserToTeam(recorder, request, s.token)
+	err = addUserToTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 	c.Assert(e, gocheck.ErrorMatches, "^User not found$")
@@ -666,9 +753,9 @@ func (s *AuthSuite) TestAddUserToTeamShouldReturnConflictIfTheUserIsAlreadyInThe
 	request, err := http.NewRequest("PUT", url, nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = AddUserToTeam(recorder, request, s.token)
+	err = addUserToTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusConflict)
 }
@@ -680,6 +767,9 @@ func (s *AuthSuite) TestAddUserToTeamShoulGrantAccessInGandalf(c *gocheck.C) {
 	u := &auth.User{Email: "marathon@rush.com", Password: "123456"}
 	err := u.Create()
 	c.Assert(err, gocheck.IsNil)
+	t, err := u.CreateToken("123456")
+	c.Assert(err, gocheck.IsNil)
+	defer auth.DeleteToken(t.Token)
 	conn, _ := db.Conn()
 	defer conn.Close()
 	defer conn.Users().Remove(bson.M{"email": u.Email})
@@ -687,9 +777,17 @@ func (s *AuthSuite) TestAddUserToTeamShoulGrantAccessInGandalf(c *gocheck.C) {
 	err = conn.Apps().Insert(a)
 	c.Assert(err, gocheck.IsNil)
 	defer conn.Apps().Remove(bson.M{"name": a.Name})
-	err = addKeyToUser("my-key", u)
+	b := bytes.NewBufferString(`{"key":"my-key"}`)
+	request, err := http.NewRequest("POST", "/users/keys", b)
 	c.Assert(err, gocheck.IsNil)
-	err = addUserToTeam(u.Email, s.team.Name, s.user)
+	recorder := httptest.NewRecorder()
+	err = addKeyToUser(recorder, request, t)
+	c.Assert(err, gocheck.IsNil)
+	url := fmt.Sprintf("/teams/%s/%s?:team=%s&:user=%s", s.team.Name, u.Email, s.team.Name, u.Email)
+	request, err = http.NewRequest("PUT", url, nil)
+	c.Assert(err, gocheck.IsNil)
+	recorder = httptest.NewRecorder()
+	err = addUserToTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	c.Check(len(h.url), gocheck.Equals, 2)
 	c.Assert(h.url[1], gocheck.Equals, "/repository/grant")
@@ -712,7 +810,7 @@ func (s *AuthSuite) TestAddUserToTeamInDatabase(c *gocheck.C) {
 	c.Assert(team.Users, gocheck.DeepEquals, []string{user.Email})
 }
 
-func (s *AuthSuite) TestAddUserToTeamInGandalfShouldCallGandalfApi(c *gocheck.C) {
+func (s *AuthSuite) TestAddUserToTeamInGandalfShouldCallGandalfAPI(c *gocheck.C) {
 	h := testHandler{}
 	ts := s.startGandalfTestServer(&h)
 	defer ts.Close()
@@ -738,11 +836,17 @@ func (s *AuthSuite) TestRemoveUserFromTeamShouldRemoveAUserFromATeamIfTheTeamExi
 	request, err := http.NewRequest("DELETE", "/teams/tsuruteam/nonee@me.me?:team=tsuruteam&:user=nonee@me.me", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveUserFromTeam(recorder, request, s.token)
+	err = removeUserFromTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	err = conn.Teams().Find(bson.M{"_id": s.team.Name}).One(s.team)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(s.team, gocheck.Not(ContainsUser), &u)
+	action := testing.Action{
+		Action: "remove-user-from-team",
+		User:   s.user.Email,
+		Extra:  []interface{}{"team=tsuruteam", "user=" + u.Email},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *AuthSuite) TestRemoveUserFromTeamShouldRemoveOnlyAppsInThatTeamInGandalfWhenUserIsInMoreThanOneTeam(c *gocheck.C) {
@@ -769,7 +873,11 @@ func (s *AuthSuite) TestRemoveUserFromTeamShouldRemoveOnlyAppsInThatTeamInGandal
 	err = conn.Apps().Insert(&app2)
 	c.Assert(err, gocheck.IsNil)
 	defer conn.Apps().Remove(bson.M{"name": app2.Name})
-	err = removeUserFromTeam(u.Email, s.team.Name, s.user)
+	url := fmt.Sprintf("/teams/%s/%s?:team=%s&:user=%s", s.team.Name, u.Email, s.team.Name, u.Email)
+	request, err := http.NewRequest("DELETE", url, nil)
+	c.Assert(err, gocheck.IsNil)
+	recorder := httptest.NewRecorder()
+	err = removeUserFromTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	expected := `{"repositories":["app1"],"users":["nobody@me.me"]}`
 	c.Assert(len(h.body), gocheck.Equals, 1)
@@ -785,9 +893,9 @@ func (s *AuthSuite) TestRemoveUserFromTeamShouldReturnNotFoundIfTheTeamDoesNotEx
 	request, err := http.NewRequest("DELETE", "/teams/tsuruteam/none@me.me?:team=unknown&:user=none@me.me", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveUserFromTeam(recorder, request, s.token)
+	err = removeUserFromTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 	c.Assert(e, gocheck.ErrorMatches, "^Team not found$")
@@ -808,9 +916,9 @@ func (s *AuthSuite) TestRemoveUserFromTeamShouldReturnUnauthorizedIfTheGivenUser
 	defer conn.Users().Remove(bson.M{"email": u.Email})
 	defer conn.Tokens().Remove(bson.M{"token": token.Token})
 	recorder := httptest.NewRecorder()
-	err = RemoveUserFromTeam(recorder, request, token)
+	err = removeUserFromTeam(recorder, request, token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusUnauthorized)
 	c.Assert(e, gocheck.ErrorMatches, "^You are not authorized to remove a member from the team tsuruteam")
@@ -832,9 +940,9 @@ func (s *AuthSuite) TestRemoveUserFromTeamShouldReturnNotFoundWhenTheUserIsNotMe
 	request, err := http.NewRequest("DELETE", "/teams/tsuruteam/none@me.me?:team=tsuruteam&:user=none@me.me", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveUserFromTeam(recorder, request, s.token)
+	err = removeUserFromTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 }
@@ -847,9 +955,9 @@ func (s *AuthSuite) TestRemoveUserFromTeamShouldReturnForbiddenIfTheUserIsTheLas
 	request, err := http.NewRequest("DELETE", url, nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveUserFromTeam(recorder, request, s.token)
+	err = removeUserFromTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
 	c.Assert(e, gocheck.ErrorMatches, "^You can not remove this user from this team, because it is the last user within the team, and a team can not be orphaned$")
@@ -864,10 +972,21 @@ func (s *AuthSuite) TestRemoveUserFromTeamRevokesAccessInGandalf(c *gocheck.C) {
 	u := &auth.User{Email: "pomar@nando-reis.com", Password: "123456"}
 	err := u.Create()
 	c.Assert(err, gocheck.IsNil)
-	defer conn.Users().Remove(bson.M{"email": u.Email})
-	err = addKeyToUser("my-key", u)
+	t, err := u.CreateToken("123456")
 	c.Assert(err, gocheck.IsNil)
-	err = addUserToTeam("pomar@nando-reis.com", s.team.Name, s.user)
+	defer auth.DeleteToken(t.Token)
+	defer conn.Users().Remove(bson.M{"email": u.Email})
+	b := bytes.NewBufferString(`{"key":"my-key"}`)
+	request, err := http.NewRequest("POST", "/users/keys", b)
+	c.Assert(err, gocheck.IsNil)
+	recorder := httptest.NewRecorder()
+	err = addKeyToUser(recorder, request, t)
+	c.Assert(err, gocheck.IsNil)
+	url := fmt.Sprintf("/teams/%s/%s?:team=%s&:user=%s", s.team.Name, u.Email, s.team.Name, u.Email)
+	request, err = http.NewRequest("PUT", url, nil)
+	c.Assert(err, gocheck.IsNil)
+	recorder = httptest.NewRecorder()
+	err = addUserToTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	a := struct {
 		Name  string
@@ -876,7 +995,11 @@ func (s *AuthSuite) TestRemoveUserFromTeamRevokesAccessInGandalf(c *gocheck.C) {
 	err = conn.Apps().Insert(a)
 	c.Assert(err, gocheck.IsNil)
 	defer conn.Apps().Remove(bson.M{"name": a.Name})
-	err = removeUserFromTeam("pomar@nando-reis.com", s.team.Name, s.user)
+	url = fmt.Sprintf("/teams/%s/%s?:team=%s&:user=%s", s.team.Name, u.Email, s.team.Name, u.Email)
+	request, err = http.NewRequest("DELETE", url, nil)
+	c.Assert(err, gocheck.IsNil)
+	recorder = httptest.NewRecorder()
+	err = removeUserFromTeam(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(h.url[2], gocheck.Equals, "/repository/revoke")
 	c.Assert(h.method[2], gocheck.Equals, "DELETE")
@@ -911,6 +1034,60 @@ func (s *AuthSuite) TestRemoveUserFromTeamInGandalf(c *gocheck.C) {
 	c.Assert(h.url[0], gocheck.Equals, "/repository/revoke")
 }
 
+func (s *AuthSuite) TestGetTeam(c *gocheck.C) {
+	team, err := auth.GetTeam(s.team.Name)
+	c.Assert(err, gocheck.IsNil)
+	url := fmt.Sprintf("/teams/%s?:name=%s", team.Name, team.Name)
+	request, err := http.NewRequest("GET", url, nil)
+	c.Assert(err, gocheck.IsNil)
+	recorder := httptest.NewRecorder()
+	err = getTeam(recorder, request, s.token)
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(recorder.Header().Get("Content-Type"), gocheck.Equals, "application/json")
+	var got auth.Team
+	err = json.NewDecoder(recorder.Body).Decode(&got)
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(got, gocheck.DeepEquals, *team)
+	action := testing.Action{
+		User:   s.user.Email,
+		Action: "get-team",
+		Extra:  []interface{}{team.Name},
+	}
+	c.Assert(action, testing.IsRecorded)
+}
+
+func (s *AuthSuite) TestGetTeamNotFound(c *gocheck.C) {
+	url := "/teams/unknown?:name=unknown"
+	request, err := http.NewRequest("GET", url, nil)
+	c.Assert(err, gocheck.IsNil)
+	recorder := httptest.NewRecorder()
+	err = getTeam(recorder, request, s.token)
+	c.Assert(err, gocheck.NotNil)
+	e, ok := err.(*errors.HTTP)
+	c.Assert(ok, gocheck.Equals, true)
+	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
+	c.Assert(e.Message, gocheck.Equals, "Team not found")
+}
+
+func (s *AuthSuite) TestGetTeamForbidden(c *gocheck.C) {
+	conn, err := db.Conn()
+	c.Assert(err, gocheck.IsNil)
+	defer conn.Close()
+	team := auth.Team{Name: "paradisum", Users: []string{"someuser@me.com"}}
+	conn.Teams().Insert(team)
+	defer conn.Teams().RemoveId(team.Name)
+	url := fmt.Sprintf("/teams/%s?:name=%s", team.Name, team.Name)
+	request, err := http.NewRequest("GET", url, nil)
+	c.Assert(err, gocheck.IsNil)
+	recorder := httptest.NewRecorder()
+	err = getTeam(recorder, request, s.token)
+	c.Assert(err, gocheck.NotNil)
+	e, ok := err.(*errors.HTTP)
+	c.Assert(ok, gocheck.Equals, true)
+	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
+	c.Assert(e.Message, gocheck.Equals, "User is not member of this team")
+}
+
 func (s *AuthSuite) TestAddKeyToUserAddsAKeyToTheUser(c *gocheck.C) {
 	h := testHandler{}
 	ts := s.startGandalfTestServer(&h)
@@ -925,11 +1102,17 @@ func (s *AuthSuite) TestAddKeyToUserAddsAKeyToTheUser(c *gocheck.C) {
 	request, err := http.NewRequest("POST", "/users/keys", b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = AddKeyToUser(recorder, request, s.token)
+	err = addKeyToUser(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	s.user, err = auth.GetUserByEmail(s.user.Email)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(s.user, HasKey, "my-key")
+	action := testing.Action{
+		Action: "add-key",
+		User:   s.user.Email,
+		Extra:  []interface{}{"my-key"},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *AuthSuite) TestAddKeyToUserReturnsErrorIfTheReadingOfTheBodyFails(c *gocheck.C) {
@@ -941,11 +1124,11 @@ func (s *AuthSuite) TestAddKeyToUserReturnsErrorIfTheReadingOfTheBodyFails(c *go
 	request, err := http.NewRequest("POST", "/users/keys", b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = AddKeyToUser(recorder, request, s.token)
+	err = addKeyToUser(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
 }
 
-func (s *AuthSuite) TestAddKeyToUserReturnsBadRequestIfTheJsonIsInvalid(c *gocheck.C) {
+func (s *AuthSuite) TestAddKeyToUserReturnsBadRequestIfTheJSONIsInvalid(c *gocheck.C) {
 	h := testHandler{}
 	ts := s.startGandalfTestServer(&h)
 	defer ts.Close()
@@ -953,9 +1136,9 @@ func (s *AuthSuite) TestAddKeyToUserReturnsBadRequestIfTheJsonIsInvalid(c *goche
 	request, err := http.NewRequest("POST", "/users/key", b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = AddKeyToUser(recorder, request, s.token)
+	err = addKeyToUser(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 	c.Assert(e, gocheck.ErrorMatches, "^Invalid JSON$")
@@ -969,9 +1152,9 @@ func (s *AuthSuite) TestAddKeyToUserReturnsBadRequestIfTheKeyIsNotPresent(c *goc
 	request, err := http.NewRequest("POST", "/users/key", b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = AddKeyToUser(recorder, request, s.token)
+	err = addKeyToUser(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 	c.Assert(e, gocheck.ErrorMatches, "^Missing key$")
@@ -985,9 +1168,9 @@ func (s *AuthSuite) TestAddKeyToUserReturnsBadRequestIfTheKeyIsEmpty(c *gocheck.
 	request, err := http.NewRequest("POST", "/users/key", b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = AddKeyToUser(recorder, request, s.token)
+	err = addKeyToUser(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 	c.Assert(e, gocheck.ErrorMatches, "^Missing key$")
@@ -1009,9 +1192,9 @@ func (s *AuthSuite) TestAddKeyToUserReturnsConflictIfTheKeyIsAlreadyPresent(c *g
 	request, err := http.NewRequest("POST", "/users/key", b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = AddKeyToUser(recorder, request, s.token)
+	err = addKeyToUser(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusConflict)
 	c.Assert(e.Message, gocheck.Equals, "User already has this key")
@@ -1026,15 +1209,24 @@ func (s *AuthSuite) TestAddKeyAddKeyToUserInGandalf(c *gocheck.C) {
 	u := &auth.User{Email: "francisco@franciscosouza.net", Password: "123456"}
 	err := u.Create()
 	c.Assert(err, gocheck.IsNil)
-	err = addKeyToUser("my-key", u)
+	t, err := u.CreateToken("123456")
+	c.Assert(err, gocheck.IsNil)
+	defer auth.DeleteToken(t.Token)
+	b := bytes.NewBufferString(`{"key":"my-key"}`)
+	request, err := http.NewRequest("POST", "/users/keys", b)
+	c.Assert(err, gocheck.IsNil)
+	recorder := httptest.NewRecorder()
+	err = addKeyToUser(recorder, request, t)
+	c.Assert(err, gocheck.IsNil)
+	u, err = auth.GetUserByEmail(u.Email)
 	c.Assert(err, gocheck.IsNil)
 	defer func() {
-		removeKeyFromUser("my-key", u)
+		removeKeyFromGandalf(&u.Keys[0], u)
 		conn.Users().RemoveAll(bson.M{"email": u.Email})
 	}()
 	c.Assert(u.Keys[0].Name, gocheck.Not(gocheck.Matches), "\\.pub$")
-	expectedUrl := fmt.Sprintf("/user/%s/key", u.Email)
-	c.Assert(h.url[0], gocheck.Equals, expectedUrl)
+	expectedURL := fmt.Sprintf("/user/%s/key", u.Email)
+	c.Assert(h.url[0], gocheck.Equals, expectedURL)
 	c.Assert(h.method[0], gocheck.Equals, "POST")
 	expected := fmt.Sprintf(`{"%s-1":"my-key"}`, u.Email)
 	c.Assert(string(h.body[0]), gocheck.Equals, expected)
@@ -1046,7 +1238,14 @@ func (s *AuthSuite) TestAddKeyToUserShouldNotInsertKeyInDatabaseWhenGandalfAddit
 	u := &auth.User{Email: "me@gmail.com", Password: "123456"}
 	err := u.Create()
 	c.Assert(err, gocheck.IsNil)
-	err = addKeyToUser("my-key", u)
+	t, err := u.CreateToken("123456")
+	c.Assert(err, gocheck.IsNil)
+	defer auth.DeleteToken(t.Token)
+	b := bytes.NewBufferString(`{"key":"my-key"}`)
+	request, err := http.NewRequest("POST", "/users/keys", b)
+	c.Assert(err, gocheck.IsNil)
+	recorder := httptest.NewRecorder()
+	err = addKeyToUser(recorder, request, t)
 	c.Assert(err, gocheck.NotNil)
 	c.Assert(err.Error(), gocheck.Equals, "Failed to add key to git server: Failed to connect to Gandalf server, it's probably down.")
 	defer conn.Users().RemoveAll(bson.M{"email": u.Email})
@@ -1070,7 +1269,7 @@ func (s *AuthSuite) TestAddKeyInDatabaseShouldStoreUsersKeyInDB(c *gocheck.C) {
 	c.Assert(u2.Keys, gocheck.DeepEquals, []auth.Key{key})
 }
 
-func (s *AuthSuite) TestAddKeyInGandalfShouldCallGandalfApi(c *gocheck.C) {
+func (s *AuthSuite) TestAddKeyInGandalfShouldCallGandalfAPI(c *gocheck.C) {
 	h := testHandler{}
 	ts := s.startGandalfTestServer(&h)
 	defer ts.Close()
@@ -1087,7 +1286,7 @@ func (s *AuthSuite) TestAddKeyInGandalfShouldCallGandalfApi(c *gocheck.C) {
 	c.Assert(h.url[0], gocheck.Equals, "/user/me@gmail.com/key")
 }
 
-func (s *AuthSuite) TestRemoveKeyFromGandalfCallsGandalfApi(c *gocheck.C) {
+func (s *AuthSuite) TestRemoveKeyFromGandalfCallsGandalfAPI(c *gocheck.C) {
 	conn, _ := db.Conn()
 	defer conn.Close()
 	u := &auth.User{Email: "me@gmail.com", Password: "123456"}
@@ -1128,39 +1327,43 @@ func (s *AuthSuite) TestRemoveKeyHandlerRemovesTheKeyFromTheUser(c *gocheck.C) {
 	h := testHandler{}
 	ts := s.startGandalfTestServer(&h)
 	defer ts.Close()
-	addKeyToUser("my-key", s.user)
-	defer func() {
-		if s.user.HasKey(auth.Key{Content: "my-key"}) {
-			removeKeyFromUser("my-key", s.user)
-		}
-	}()
 	b := bytes.NewBufferString(`{"key":"my-key"}`)
-	request, err := http.NewRequest("DELETE", "/users/key", b)
+	request, err := http.NewRequest("POST", "/users/keys", b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveKeyFromUser(recorder, request, s.token)
+	addKeyToUser(recorder, request, s.token)
+	b = bytes.NewBufferString(`{"key":"my-key"}`)
+	request, err = http.NewRequest("DELETE", "/users/key", b)
+	c.Assert(err, gocheck.IsNil)
+	recorder = httptest.NewRecorder()
+	err = removeKeyFromUser(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	u2, err := auth.GetUserByEmail(s.user.Email)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(u2, gocheck.Not(HasKey), "my-key")
+	action := testing.Action{
+		Action: "remove-key",
+		User:   s.user.Email,
+		Extra:  []interface{}{"my-key"},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *AuthSuite) TestRemoveKeyHandlerCallsGandalfRemoveKey(c *gocheck.C) {
 	h := testHandler{}
 	ts := s.startGandalfTestServer(&h)
 	defer ts.Close()
-	err := addKeyToUser("my-key", s.user) //fills the first position in h properties
-	c.Assert(err, gocheck.IsNil)
-	defer func() {
-		if s.user.HasKey(auth.Key{Content: "my-key"}) {
-			removeKeyFromUser("my-key", s.user)
-		}
-	}()
 	b := bytes.NewBufferString(`{"key":"my-key"}`)
-	request, err := http.NewRequest("DELETE", "/users/key", b)
+	request, err := http.NewRequest("POST", "/users/keys", b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveKeyFromUser(recorder, request, s.token)
+	err = addKeyToUser(recorder, request, s.token) //fills the first position in h properties
+	c.Assert(err, gocheck.IsNil)
+	b = bytes.NewBufferString(`{"key":"my-key"}`)
+	request, err = http.NewRequest("DELETE", "/users/key", b)
+	c.Assert(err, gocheck.IsNil)
+	recorder = httptest.NewRecorder()
+	err = removeKeyFromUser(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	s.user, _ = auth.GetUserByEmail(s.user.Email)
 	c.Assert(h.url[1], gocheck.Equals, fmt.Sprintf("/user/%s/key/%s-%d", s.user.Email, s.user.Email, len(s.user.Keys)+1))
@@ -1174,7 +1377,7 @@ func (s *AuthSuite) TestRemoveKeyHandlerReturnsErrorInCaseOfAnyIOFailure(c *goch
 	request, err := http.NewRequest("DELETE", "/users/key", b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveKeyFromUser(recorder, request, s.token)
+	err = removeKeyFromUser(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
 }
 
@@ -1183,9 +1386,9 @@ func (s *AuthSuite) TestRemoveKeyHandlerReturnsBadRequestIfTheJSONIsInvalid(c *g
 	request, err := http.NewRequest("DELETE", "/users/key", b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveKeyFromUser(recorder, request, s.token)
+	err = removeKeyFromUser(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 	c.Assert(e, gocheck.ErrorMatches, "^Invalid JSON$")
@@ -1196,9 +1399,9 @@ func (s *AuthSuite) TestRemoveKeyHandlerReturnsBadRequestIfTheKeyIsNotPresent(c 
 	request, err := http.NewRequest("DELETE", "/users/key", b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveKeyFromUser(recorder, request, s.token)
+	err = removeKeyFromUser(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 	c.Assert(e, gocheck.ErrorMatches, "^Missing key$")
@@ -1209,9 +1412,9 @@ func (s *AuthSuite) TestRemoveKeyHandlerReturnsBadRequestIfTheKeyIsEmpty(c *goch
 	request, err := http.NewRequest("DELETE", "/users/key", b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveKeyFromUser(recorder, request, s.token)
+	err = removeKeyFromUser(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 	c.Assert(e, gocheck.ErrorMatches, "^Missing key$")
@@ -1222,11 +1425,42 @@ func (s *AuthSuite) TestRemoveKeyHandlerReturnsNotFoundIfTheUserDoesNotHaveTheKe
 	request, err := http.NewRequest("DELETE", "/users/key", b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveKeyFromUser(recorder, request, s.token)
+	err = removeKeyFromUser(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
+}
+
+func (s *AuthSuite) TestListKeysHandler(c *gocheck.C) {
+	h := testHandler{
+		content: `{"homekey": "lol somekey somecomment", "workkey": "lol someotherkey someothercomment"}`,
+	}
+	ts := s.startGandalfTestServer(&h)
+	defer ts.Close()
+	recorder := httptest.NewRecorder()
+	request, err := http.NewRequest("GET", "/users/cartman@south.park/keys?email=cartman@south.park", nil)
+	c.Assert(err, gocheck.IsNil)
+	err = listKeys(recorder, request, s.token)
+	c.Assert(err, gocheck.IsNil)
+	got := map[string]string{}
+	err = json.NewDecoder(recorder.Body).Decode(&got)
+	c.Assert(err, gocheck.IsNil)
+	expected := map[string]string{
+		"homekey": "lol somekey somecomment",
+		"workkey": "lol someotherkey someothercomment",
+	}
+	c.Assert(expected, gocheck.DeepEquals, got)
+}
+
+func (s *AuthSuite) TestListKeysRepassesGandalfsErrors(c *gocheck.C) {
+	h := testBadHandler{}
+	ts := s.startGandalfTestServer(&h)
+	defer ts.Close()
+	recorder := httptest.NewRecorder()
+	request, err := http.NewRequest("GET", "/users/cartman@south.park/keys?email=cartman@south.park", nil)
+	err = listKeys(recorder, request, s.token)
+	c.Assert(err.Error(), gocheck.Equals, "some error\n")
 }
 
 func (s *AuthSuite) TestRemoveUser(c *gocheck.C) {
@@ -1245,11 +1479,38 @@ func (s *AuthSuite) TestRemoveUser(c *gocheck.C) {
 	request, err := http.NewRequest("DELETE", "/users", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveUser(recorder, request, token)
+	err = removeUser(recorder, request, token)
 	c.Assert(err, gocheck.IsNil)
 	n, err := conn.Users().Find(bson.M{"email": u.Email}).Count()
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(n, gocheck.Equals, 0)
+	action := testing.Action{Action: "remove-user", User: u.Email}
+	c.Assert(action, testing.IsRecorded)
+}
+
+func (s *AuthSuite) TestRemoveUserWithQuota(c *gocheck.C) {
+	// The setting doesn't matter, it must always delete the quota.
+	err := quota.Create("clap@yes.com", 10)
+	c.Assert(err, gocheck.IsNil)
+	h := testHandler{}
+	ts := s.startGandalfTestServer(&h)
+	defer ts.Close()
+	conn, _ := db.Conn()
+	defer conn.Close()
+	u := auth.User{Email: "clap@yes.com", Password: "clapyes"}
+	err = u.Create()
+	c.Assert(err, gocheck.IsNil)
+	defer conn.Users().Remove(bson.M{"email": u.Email})
+	token, err := u.CreateToken("clapyes")
+	c.Assert(err, gocheck.IsNil)
+	defer conn.Tokens().Remove(bson.M{"token": token.Token})
+	request, err := http.NewRequest("DELETE", "/users", nil)
+	c.Assert(err, gocheck.IsNil)
+	recorder := httptest.NewRecorder()
+	err = removeUser(recorder, request, token)
+	c.Assert(err, gocheck.IsNil)
+	err = quota.Reserve("clap@yes.com", "something")
+	c.Assert(err, gocheck.Equals, quota.ErrQuotaNotFound)
 }
 
 func (s *AuthSuite) TestRemoveUserWithTheUserBeingLastMemberOfATeam(c *gocheck.C) {
@@ -1272,9 +1533,9 @@ func (s *AuthSuite) TestRemoveUserWithTheUserBeingLastMemberOfATeam(c *gocheck.C
 	request, err := http.NewRequest("DELETE", "/users", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveUser(recorder, request, token)
+	err = removeUser(recorder, request, token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
 	expected := `This user is the last member of the team "painofsalvation", so it cannot be removed.
@@ -1303,7 +1564,7 @@ func (s *AuthSuite) TestRemoveUserShouldRemoveTheUserFromAllTeamsThatHeIsMember(
 	request, err := http.NewRequest("DELETE", "/users", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveUser(recorder, request, token)
+	err = removeUser(recorder, request, token)
 	c.Assert(err, gocheck.IsNil)
 	err = conn.Teams().Find(bson.M{"_id": t.Name}).One(&t)
 	c.Assert(err, gocheck.IsNil)
@@ -1343,7 +1604,7 @@ func (s *AuthSuite) TestRemoveUserRevokesAccessInGandalf(c *gocheck.C) {
 	request, err := http.NewRequest("DELETE", "/users", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RemoveUser(recorder, request, token)
+	err = removeUser(recorder, request, token)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(h.url[0], gocheck.Equals, "/repository/revoke")
 	c.Assert(h.method[0], gocheck.Equals, "DELETE")
@@ -1365,11 +1626,16 @@ func (s *AuthSuite) TestChangePasswordHandler(c *gocheck.C) {
 	request, err := http.NewRequest("PUT", "/users/password", body)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = ChangePassword(recorder, request, token)
+	err = changePassword(recorder, request, token)
 	c.Assert(err, gocheck.IsNil)
 	otherUser, err := auth.GetUserByEmail(s.user.Email)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(otherUser.Password, gocheck.Not(gocheck.Equals), oldPassword)
+	action := testing.Action{
+		Action: "change-password",
+		User:   u.Email,
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *AuthSuite) TestChangePasswordReturns412IfNewPasswordIsInvalid(c *gocheck.C) {
@@ -1385,11 +1651,11 @@ func (s *AuthSuite) TestChangePasswordReturns412IfNewPasswordIsInvalid(c *gochec
 	request, err := http.NewRequest("PUT", "/users/password", body)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = ChangePassword(recorder, request, token)
+	err = changePassword(recorder, request, token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
-	c.Check(e.Code, gocheck.Equals, http.StatusPreconditionFailed)
+	c.Check(e.Code, gocheck.Equals, http.StatusBadRequest)
 	c.Check(e.Message, gocheck.Equals, "Password length should be least 6 characters and at most 50 characters.")
 }
 
@@ -1398,9 +1664,9 @@ func (s *AuthSuite) TestChangePasswordReturns404IfOldPasswordDidntMatch(c *goche
 	request, err := http.NewRequest("PUT", "/users/password", body)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = ChangePassword(recorder, request, s.token)
+	err = changePassword(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Check(e.Code, gocheck.Equals, http.StatusForbidden)
 	c.Check(e.Message, gocheck.Equals, "The given password didn't match the user's current password.")
@@ -1411,9 +1677,9 @@ func (s *AuthSuite) TestChangePasswordReturns400IfRequestBodyIsInvalidJSON(c *go
 	request, err := http.NewRequest("PUT", "/users/password", body)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = ChangePassword(recorder, request, s.token)
+	err = changePassword(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 	c.Assert(e.Message, gocheck.Equals, "Invalid JSON.")
@@ -1426,13 +1692,95 @@ func (s *AuthSuite) TestChangePasswordReturns400IfJSONDoesNotIncludeBothOldAndNe
 		request, err := http.NewRequest("PUT", "/users/password", b)
 		c.Assert(err, gocheck.IsNil)
 		recorder := httptest.NewRecorder()
-		err = ChangePassword(recorder, request, s.token)
+		err = changePassword(recorder, request, s.token)
 		c.Assert(err, gocheck.NotNil)
-		e, ok := err.(*errors.Http)
+		e, ok := err.(*errors.HTTP)
 		c.Assert(ok, gocheck.Equals, true)
 		c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 		c.Assert(e.Message, gocheck.Equals, "Both the old and the new passwords are required.")
 	}
+}
+
+func (s *AuthSuite) TestResetPasswordStep1(c *gocheck.C) {
+	defer s.server.Reset()
+	oldPassword := s.user.Password
+	url := fmt.Sprintf("/users/%s/password?:email=%s", s.user.Email, s.user.Email)
+	request, _ := http.NewRequest("POST", url, nil)
+	recorder := httptest.NewRecorder()
+	err := resetPassword(recorder, request)
+	c.Assert(err, gocheck.IsNil)
+	conn, err := db.Conn()
+	c.Assert(err, gocheck.IsNil)
+	defer conn.Close()
+	var m map[string]interface{}
+	err = conn.PasswordTokens().Find(bson.M{"useremail": s.user.Email}).One(&m)
+	c.Assert(err, gocheck.IsNil)
+	defer conn.PasswordTokens().RemoveId(m["_id"])
+	time.Sleep(1e9)
+	s.server.RLock()
+	defer s.server.RUnlock()
+	c.Assert(s.server.MailBox, gocheck.HasLen, 1)
+	u, err := auth.GetUserByEmail(s.user.Email)
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(u.Password, gocheck.Equals, oldPassword)
+	action := testing.Action{
+		Action: "reset-password-gen-token",
+		User:   s.user.Email,
+	}
+	c.Assert(action, testing.IsRecorded)
+}
+
+func (s *AuthSuite) TestResetPasswordUserNotFound(c *gocheck.C) {
+	url := "/users/unknown@tsuru.io/password?:email=unknown@tsuru.io"
+	request, _ := http.NewRequest("POST", url, nil)
+	recorder := httptest.NewRecorder()
+	err := resetPassword(recorder, request)
+	c.Assert(err, gocheck.NotNil)
+	e, ok := err.(*errors.HTTP)
+	c.Assert(ok, gocheck.Equals, true)
+	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
+	c.Assert(e.Message, gocheck.Equals, "User not found")
+}
+
+func (s *AuthSuite) TestResetPasswordInvalidEmail(c *gocheck.C) {
+	url := "/users/unknown/password?:email=unknown"
+	request, _ := http.NewRequest("POST", url, nil)
+	recorder := httptest.NewRecorder()
+	err := resetPassword(recorder, request)
+	c.Assert(err, gocheck.NotNil)
+	e, ok := err.(*errors.HTTP)
+	c.Assert(ok, gocheck.Equals, true)
+	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
+	c.Assert(e.Message, gocheck.Equals, "Invalid email.")
+}
+
+func (s *AuthSuite) TestResetPasswordStep2(c *gocheck.C) {
+	conn, err := db.Conn()
+	c.Assert(err, gocheck.IsNil)
+	defer conn.Close()
+	user := auth.User{Email: "uns@alanis.com", Password: "145678"}
+	err = user.Create()
+	c.Assert(err, gocheck.IsNil)
+	defer conn.Users().Remove(bson.M{"email": user.Email})
+	oldPassword := user.Password
+	err = user.StartPasswordReset()
+	c.Assert(err, gocheck.IsNil)
+	var t map[string]interface{}
+	err = conn.PasswordTokens().Find(bson.M{"useremail": user.Email}).One(&t)
+	c.Assert(err, gocheck.IsNil)
+	url := fmt.Sprintf("/users/%s/password?:email=%s&token=%s", user.Email, user.Email, t["_id"])
+	request, _ := http.NewRequest("POST", url, nil)
+	recorder := httptest.NewRecorder()
+	err = resetPassword(recorder, request)
+	c.Assert(err, gocheck.IsNil)
+	u2, err := auth.GetUserByEmail(user.Email)
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(u2.Password, gocheck.Not(gocheck.Equals), oldPassword)
+	action := testing.Action{
+		Action: "reset-password",
+		User:   user.Email,
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *AuthSuite) TestGenerateApplicationToken(c *gocheck.C) {
@@ -1441,13 +1789,13 @@ func (s *AuthSuite) TestGenerateApplicationToken(c *gocheck.C) {
 	recorder := httptest.NewRecorder()
 	err := generateAppToken(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
-	var jsonToken map[string]string
+	var jsonToken map[string]interface{}
 	err = json.NewDecoder(recorder.Body).Decode(&jsonToken)
 	c.Assert(err, gocheck.IsNil)
 	conn, _ := db.Conn()
 	defer conn.Close()
 	defer conn.Tokens().Remove(bson.M{"token": jsonToken["token"]})
-	t, err := auth.GetToken(jsonToken["token"])
+	t, err := auth.GetToken("bearer " + jsonToken["token"].(string))
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(t.AppName, gocheck.Equals, "tsuru-healer")
 }
@@ -1466,7 +1814,7 @@ func (s *AuthSuite) TestGenerateApplicationTokenMissingClient(c *gocheck.C) {
 	recorder := httptest.NewRecorder()
 	err := generateAppToken(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 	c.Assert(e.Message, gocheck.Equals, "Missing client name in JSON body")

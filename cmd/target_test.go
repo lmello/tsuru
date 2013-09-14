@@ -34,27 +34,15 @@ func (s *S) TestWriteTarget(c *gocheck.C) {
 	c.Assert(readRecordedTarget(rfs), gocheck.Equals, "http://tsuru.globo.com")
 }
 
-func (s *S) TestWriteTargetShouldStripLeadingSlashs(c *gocheck.C) {
+func (s *S) TestWriteTargetKeepsLeadingSlashs(c *gocheck.C) {
 	rfs := &testing.RecordingFs{}
 	fsystem = rfs
 	defer func() {
 		fsystem = nil
 	}()
-	err := writeTarget("http://tsuru.globo.com/")
+	err := writeTarget("http://tsuru.globo.com//")
 	c.Assert(err, gocheck.IsNil)
-	c.Assert(readRecordedTarget(rfs), gocheck.Equals, "http://tsuru.globo.com")
-}
-
-func (s *S) TestWriteTargetShouldStripAllLeadingSlashs(c *gocheck.C) {
-	rfs := &testing.RecordingFs{}
-	fsystem = rfs
-	defer func() {
-		fsystem = nil
-	}()
-	err := writeTarget("http://tsuru.globo.com////")
-	c.Assert(err, gocheck.IsNil)
-	target := readRecordedTarget(rfs)
-	c.Assert(target, gocheck.Equals, "http://tsuru.globo.com")
+	c.Assert(readRecordedTarget(rfs), gocheck.Equals, "http://tsuru.globo.com//")
 }
 
 func (s *S) TestReadTarget(c *gocheck.C) {
@@ -101,60 +89,69 @@ func (s *S) TestDeleteTargetFile(c *gocheck.C) {
 	c.Assert(rfs.HasAction("remove "+targetFile), gocheck.Equals, true)
 }
 
-func (s *S) TestGetUrl(c *gocheck.C) {
+func (s *S) TestGetURL(c *gocheck.C) {
 	fsystem = &testing.RecordingFs{FileContent: "http://localhost"}
 	defer func() {
 		fsystem = nil
 	}()
 	expected := "http://localhost/apps"
-	got, err := GetUrl("/apps")
+	got, err := GetURL("/apps")
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(got, gocheck.Equals, expected)
 }
 
-func (s *S) TestGetUrlPutsHttpIfItIsNotPresent(c *gocheck.C) {
+func (s *S) TestGetURLPutsHTTPIfItIsNotPresent(c *gocheck.C) {
 	rfs := &testing.RecordingFs{FileContent: "remotehost"}
 	fsystem = rfs
 	defer func() {
 		fsystem = nil
 	}()
 	expected := "http://remotehost/apps"
-	got, err := GetUrl("/apps")
+	got, err := GetURL("/apps")
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(got, gocheck.Equals, expected)
 }
 
-func (s *S) TestGetUrlShouldNotPrependHttpIfTheTargetIsHttps(c *gocheck.C) {
+func (s *S) TestGetURLShouldNotPrependHTTPIfTheTargetIsHTTPs(c *gocheck.C) {
 	rfs := &testing.RecordingFs{FileContent: "https://localhost"}
 	fsystem = rfs
 	defer func() {
 		fsystem = nil
 	}()
-	got, err := GetUrl("/apps")
+	got, err := GetURL("/apps")
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(got, gocheck.Equals, "https://localhost/apps")
 }
 
-func (s *S) TestGetUrlUndefinedTarget(c *gocheck.C) {
+func (s *S) TestGetURLUndefinedTarget(c *gocheck.C) {
 	rfs := &testing.FailureFs{}
 	fsystem = rfs
 	defer func() {
 		fsystem = nil
 	}()
-	got, err := GetUrl("/apps")
+	got, err := GetURL("/apps")
 	c.Assert(got, gocheck.Equals, "")
 	c.Assert(err, gocheck.NotNil)
 	_, ok := err.(undefinedTargetError)
 	c.Assert(ok, gocheck.Equals, true)
 }
 
+func (s *S) TestGetURLLeadingSlashes(c *gocheck.C) {
+	rfs := &testing.RecordingFs{FileContent: "https://localhost/tsuru/"}
+	fsystem = rfs
+	defer func() {
+		fsystem = nil
+	}()
+	got, err := GetURL("/apps")
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(got, gocheck.Equals, "https://localhost/tsuru/apps")
+}
+
 func (s *S) TestTargetAddInfo(c *gocheck.C) {
-	desc := `Add a new target on target-list (tsuru server)
-`
 	expected := &Info{
 		Name:    "target-add",
-		Usage:   "target-add <label> <target> [--set-current]",
-		Desc:    desc,
+		Usage:   "target-add <label> <target> [--set-current|-s]",
+		Desc:    "Adds a new entry to the list of available targets",
 		MinArgs: 2,
 	}
 	targetAdd := &targetAdd{}
@@ -171,7 +168,7 @@ func (s *S) TestTargetAddRun(c *gocheck.C) {
 	targetAdd := &targetAdd{}
 	err := targetAdd.Run(context, nil)
 	c.Assert(err, gocheck.IsNil)
-	c.Assert(context.Stdout.(*bytes.Buffer).String(), gocheck.Equals, "New target default -> http://tsuru.google.com added to target-list\n")
+	c.Assert(context.Stdout.(*bytes.Buffer).String(), gocheck.Equals, "New target default -> http://tsuru.google.com added to target list\n")
 }
 
 func (s *S) TestTargetAddRunOnlyOneArg(c *gocheck.C) {
@@ -185,6 +182,23 @@ func (s *S) TestTargetAddRunOnlyOneArg(c *gocheck.C) {
 	err := targetAdd.Run(context, nil)
 	c.Assert(err, gocheck.NotNil)
 	c.Assert(err.Error(), gocheck.Equals, "Invalid arguments")
+}
+
+func (s *S) TestTargetAddWithSet(c *gocheck.C) {
+	rfs := &testing.RecordingFs{FileContent: "old\thttp://tsuru.io"}
+	fsystem = rfs
+	defer func() {
+		fsystem = nil
+	}()
+	context := &Context{[]string{"default", "http://tsuru.google.com"}, manager.stdout, manager.stderr, manager.stdin}
+	targetAdd := &targetAdd{}
+	targetAdd.Flags().Parse(true, []string{"-s"})
+	err := targetAdd.Run(context, nil)
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(context.Stdout.(*bytes.Buffer).String(), gocheck.Equals, "New target default -> http://tsuru.google.com added to target list and defined as the current target\n")
+	t, err := readTarget()
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(t, gocheck.Equals, "http://tsuru.google.com")
 }
 
 func (s *S) TestTargetAddFlags(c *gocheck.C) {
@@ -424,7 +438,7 @@ For more details, please run "tsuru help target".`
 }
 
 func (s *S) TestNewTargetSlice(c *gocheck.C) {
-	var t *targetSlice = newTargetSlice()
+	t := newTargetSlice()
 	c.Assert(t.sorted, gocheck.Equals, false)
 	c.Assert(t.current, gocheck.Equals, -1)
 	c.Assert(t.targets, gocheck.IsNil)

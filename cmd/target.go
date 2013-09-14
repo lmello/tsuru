@@ -100,7 +100,7 @@ func deleteTargetFile() {
 	filesystem().Remove(joinWithUserDir(".tsuru_target"))
 }
 
-func GetUrl(path string) (string, error) {
+func GetURL(path string) (string, error) {
 	var prefix string
 	target, err := readTarget()
 	if err != nil {
@@ -109,7 +109,7 @@ func GetUrl(path string) (string, error) {
 	if m, _ := regexp.MatchString("^https?://", target); !m {
 		prefix = "http://"
 	}
-	return prefix + target + path, nil
+	return prefix + strings.TrimRight(target, "/") + path, nil
 }
 
 func writeTarget(t string) error {
@@ -119,10 +119,8 @@ func writeTarget(t string) error {
 		return err
 	}
 	defer targetFile.Close()
-	t = strings.TrimRight(t, "/")
-	content := []byte(t)
-	n, err := targetFile.Write(content)
-	if n != len(content) || err != nil {
+	n, err := targetFile.WriteString(t)
+	if n != len(t) || err != nil {
 		return errors.New("Failed to write the target file")
 	}
 	return nil
@@ -134,17 +132,15 @@ type targetAdd struct {
 }
 
 func (t *targetAdd) Info() *Info {
-	desc := `Add a new target on target-list (tsuru server)
-`
 	return &Info{
 		Name:    "target-add",
-		Usage:   "target-add <label> <target> [--set-current]",
-		Desc:    desc,
+		Usage:   "target-add <label> <target> [--set-current|-s]",
+		Desc:    "Adds a new entry to the list of available targets",
 		MinArgs: 2,
 	}
 }
 
-func (t *targetAdd) Run(ctx *Context, client Doer) error {
+func (t *targetAdd) Run(ctx *Context, client *Client) error {
 	var target string
 	var label string
 	if len(ctx.Args) != 2 {
@@ -156,7 +152,12 @@ func (t *targetAdd) Run(ctx *Context, client Doer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(ctx.Stdout, "New target %s -> %s added to target-list\n", label, target)
+	fmt.Fprintf(ctx.Stdout, "New target %s -> %s added to target list", label, target)
+	if t.set {
+		writeTarget(target)
+		fmt.Fprint(ctx.Stdout, " and defined as the current target")
+	}
+	fmt.Fprintln(ctx.Stdout)
 	return nil
 }
 
@@ -253,7 +254,7 @@ Other commands related to target:
 	}
 }
 
-func (t *targetList) Run(ctx *Context, client Doer) error {
+func (t *targetList) Run(ctx *Context, client *Client) error {
 	slice := newTargetSlice()
 	targets, err := getTargets()
 	if err != nil {
@@ -282,7 +283,7 @@ func (t *targetRemove) Info() *Info {
 	}
 }
 
-func (t *targetRemove) Run(ctx *Context, client Doer) error {
+func (t *targetRemove) Run(ctx *Context, client *Client) error {
 	if len(ctx.Args) != 1 {
 		return errors.New("Invalid arguments")
 	}
@@ -326,7 +327,7 @@ func (t *targetSet) Info() *Info {
 	}
 }
 
-func (t *targetSet) Run(ctx *Context, client Doer) error {
+func (t *targetSet) Run(ctx *Context, client *Client) error {
 	if len(ctx.Args) != 1 {
 		return errors.New("Invalid arguments")
 	}

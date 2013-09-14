@@ -7,6 +7,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"github.com/globocom/tsuru/fs"
 	"github.com/globocom/tsuru/fs/testing"
 	"io"
@@ -35,7 +36,7 @@ func (c *TestCommand) Info() *Info {
 	}
 }
 
-func (c *TestCommand) Run(context *Context, client Doer) error {
+func (c *TestCommand) Run(context *Context, client *Client) error {
 	io.WriteString(context.Stdout, "Running TestCommand")
 	return nil
 }
@@ -48,7 +49,7 @@ func (c *ErrorCommand) Info() *Info {
 	return &Info{Name: "error"}
 }
 
-func (c *ErrorCommand) Run(context *Context, client Doer) error {
+func (c *ErrorCommand) Run(context *Context, client *Client) error {
 	return errors.New(c.msg)
 }
 
@@ -63,7 +64,7 @@ func (c *CommandWithFlags) Info() *Info {
 	return &Info{Name: "with-flags", MinArgs: c.minArgs}
 }
 
-func (c *CommandWithFlags) Run(context *Context, client Doer) error {
+func (c *CommandWithFlags) Run(context *Context, client *Client) error {
 	c.args = context.Args
 	return nil
 }
@@ -80,6 +81,33 @@ func (s *S) TestRegister(c *gocheck.C) {
 	manager.Register(&TestCommand{})
 	badCall := func() { manager.Register(&TestCommand{}) }
 	c.Assert(badCall, gocheck.PanicMatches, "command already registered: foo")
+}
+
+func (s *S) TestRegisterTopic(c *gocheck.C) {
+	manager := Manager{}
+	manager.RegisterTopic("target", "targetting everything!")
+	c.Assert(manager.topics["target"], gocheck.Equals, "targetting everything!")
+}
+
+func (s *S) TestRegisterTopicDuplicated(c *gocheck.C) {
+	manager := Manager{}
+	manager.RegisterTopic("target", "targetting everything!")
+	defer func() {
+		r := recover()
+		c.Assert(r, gocheck.NotNil)
+	}()
+	manager.RegisterTopic("target", "wat")
+}
+
+func (s *S) TestRegisterTopicMultiple(c *gocheck.C) {
+	manager := Manager{}
+	manager.RegisterTopic("target", "targetted")
+	manager.RegisterTopic("app", "what's an app?")
+	expected := map[string]string{
+		"target": "targetted",
+		"app":    "what's an app?",
+	}
+	c.Assert(manager.topics, gocheck.DeepEquals, expected)
 }
 
 func (s *S) TestManagerRunShouldWriteErrorsOnStderr(c *gocheck.C) {
@@ -140,6 +168,7 @@ func (s *S) TestRunCommandThatDoesNotExist(c *gocheck.C) {
 	c.Assert(manager.stderr.(*bytes.Buffer).String(), gocheck.Equals, `Error: command "bar" does not exist`+"\n")
 	c.Assert(manager.e.(*recordingExiter).value(), gocheck.Equals, 1)
 }
+
 func (s *S) TestHelp(c *gocheck.C) {
 	expected := `glb version 1.0.
 
@@ -150,10 +179,51 @@ Available commands:
   user-create
   version
 
-Run glb help <commandname> to get more information about a specific command.
+Use glb help <commandname> to get more information about a command.
 `
 	manager.Register(&userCreate{})
 	context := Context{[]string{}, manager.stdout, manager.stderr, manager.stdin}
+	command := help{manager: manager}
+	err := command.Run(&context, nil)
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(manager.stdout.(*bytes.Buffer).String(), gocheck.Equals, expected)
+}
+
+func (s *S) TestHelpWithTopics(c *gocheck.C) {
+	expected := `glb version 1.0.
+
+Usage: glb command [args]
+
+Available commands:
+  help
+  user-create
+  version
+
+Use glb help <commandname> to get more information about a command.
+
+Available topics:
+  target
+
+Use glb help <topicname> to get more information about a topic.
+`
+	manager.Register(&userCreate{})
+	manager.RegisterTopic("target", "something")
+	context := Context{[]string{}, manager.stdout, manager.stderr, manager.stdin}
+	command := help{manager: manager}
+	err := command.Run(&context, nil)
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(manager.stdout.(*bytes.Buffer).String(), gocheck.Equals, expected)
+}
+
+func (s *S) TestHelpFromTopic(c *gocheck.C) {
+	expected := `glb version 1.0.
+
+Targets
+
+Tsuru likes to manage targets
+`
+	manager.RegisterTopic("target", "Targets\n\nTsuru likes to manage targets\n")
+	context := Context{[]string{"target"}, manager.stdout, manager.stderr, manager.stdin}
 	command := help{manager: manager}
 	err := command.Run(&context, nil)
 	c.Assert(err, gocheck.IsNil)
@@ -172,10 +242,10 @@ func (s *S) TestHelpReturnErrorIfTheGivenCommandDoesNotExist(c *gocheck.C) {
 	context := Context{[]string{"user-create"}, manager.stdout, manager.stderr, manager.stdin}
 	err := command.Run(&context, nil)
 	c.Assert(err, gocheck.NotNil)
-	c.Assert(err, gocheck.ErrorMatches, `^Error: command "user-create" does not exist.$`)
+	c.Assert(err, gocheck.ErrorMatches, `^command "user-create" does not exist.$`)
 }
 
-func (s *S) TestRunWithoutArgsShouldRunsHelp(c *gocheck.C) {
+func (s *S) TestRunWithoutArgsShouldRunHelp(c *gocheck.C) {
 	expected := `glb version 1.0.
 
 Usage: glb command [args]
@@ -184,7 +254,7 @@ Available commands:
   help
   version
 
-Run glb help <commandname> to get more information about a specific command.
+Use glb help <commandname> to get more information about a command.
 `
 	manager.Run([]string{})
 	c.Assert(manager.stdout.(*bytes.Buffer).String(), gocheck.Equals, expected)
@@ -196,6 +266,7 @@ func (s *S) TestHelpShouldReturnHelpForACmd(c *gocheck.C) {
 Usage: glb foo
 
 Foo do anything or nothing.
+
 `
 	manager.Register(&TestCommand{})
 	manager.Run([]string{"help", "foo"})
@@ -228,28 +299,48 @@ func (c *ArgCmd) Info() *Info {
 	return &Info{
 		Name:    "arg",
 		MinArgs: 1,
+		MaxArgs: 2,
 		Usage:   "arg [args]",
 		Desc:    "some desc",
 	}
 }
 
-func (cmd *ArgCmd) Run(ctx *Context, client Doer) error {
+func (cmd *ArgCmd) Run(ctx *Context, client *Client) error {
 	return nil
 }
 
 func (s *S) TestRunWrongArgsNumberShouldRunsHelpAndReturnStatus1(c *gocheck.C) {
 	expected := `glb version 1.0.
 
-ERROR: not enough arguments to call arg.
+ERROR: wrong number of arguments.
 
 Usage: glb arg [args]
 
 some desc
 
-Minimum arguments: 1
+Minimum # of arguments: 1
+Maximum # of arguments: 2
 `
 	manager.Register(&ArgCmd{})
 	manager.Run([]string{"arg"})
+	c.Assert(manager.stdout.(*bytes.Buffer).String(), gocheck.Equals, expected)
+	c.Assert(manager.e.(*recordingExiter).value(), gocheck.Equals, 1)
+}
+
+func (s *S) TestRunWithTooManyArguments(c *gocheck.C) {
+	expected := `glb version 1.0.
+
+ERROR: wrong number of arguments.
+
+Usage: glb arg [args]
+
+some desc
+
+Minimum # of arguments: 1
+Maximum # of arguments: 2
+`
+	manager.Register(&ArgCmd{})
+	manager.Run([]string{"arg", "param1", "param2", "param3"})
 	c.Assert(manager.stdout.(*bytes.Buffer).String(), gocheck.Equals, expected)
 	c.Assert(manager.e.(*recordingExiter).value(), gocheck.Equals, 1)
 }
@@ -260,6 +351,7 @@ func (s *S) TestHelpShouldReturnUsageWithTheCommandName(c *gocheck.C) {
 Usage: tsuru foo
 
 Foo do anything or nothing.
+
 `
 	var stdout, stderr bytes.Buffer
 	manager := NewManager("tsuru", "1.0", "", &stdout, &stderr, os.Stdin)
@@ -346,11 +438,24 @@ func (s *S) TestTeamRemoveUserIsRegistered(c *gocheck.C) {
 	c.Assert(removeuser, gocheck.FitsTypeOf, &teamUserRemove{})
 }
 
-func (s *S) TestTargetIsRegistered(c *gocheck.C) {
+func (s *S) TestTeamUserListIsRegistered(c *gocheck.C) {
+	manager := BuildBaseManager("tsuru", "1.0", "")
+	listuser, ok := manager.Commands["team-user-list"]
+	c.Assert(ok, gocheck.Equals, true)
+	c.Assert(listuser, gocheck.FitsTypeOf, teamUserList{})
+}
+
+func (s *S) TestTargetListIsRegistered(c *gocheck.C) {
 	manager := BuildBaseManager("tsuru", "1.0", "")
 	tgt, ok := manager.Commands["target-list"]
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(tgt, gocheck.FitsTypeOf, &targetList{})
+}
+
+func (s *S) TestTargetTopicIsRegistered(c *gocheck.C) {
+	manager := BuildBaseManager("tsuru", "1.0", "")
+	expected := fmt.Sprintf(targetTopic, "tsuru")
+	c.Assert(manager.topics["target"], gocheck.Equals, expected)
 }
 
 func (s *S) TestUserRemoveIsRegistered(c *gocheck.C) {
@@ -372,6 +477,13 @@ func (s *S) TestChangePasswordIsRegistered(c *gocheck.C) {
 	chpass, ok := manager.Commands["change-password"]
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(chpass, gocheck.FitsTypeOf, &changePassword{})
+}
+
+func (s *S) TestResetPasswordIsRegistered(c *gocheck.C) {
+	manager := BuildBaseManager("tsuru", "1.0", "")
+	reset, ok := manager.Commands["reset-password"]
+	c.Assert(ok, gocheck.Equals, true)
+	c.Assert(reset, gocheck.FitsTypeOf, &resetPassword{})
 }
 
 func (s *S) TestVersionIsRegisteredByNewManager(c *gocheck.C) {
@@ -409,8 +521,33 @@ func (s *S) TestValidateVersion(c *gocheck.C) {
 			support:  "0.3",
 			expected: false,
 		},
+		{
+			current:  "0.7.10",
+			support:  "0.7.2",
+			expected: true,
+		},
+		{
+			current:  "beta",
+			support:  "0.7.2",
+			expected: false,
+		},
+		{
+			current:  "0.7.10",
+			support:  "beta",
+			expected: false,
+		},
+		{
+			current:  "0.7.10",
+			support:  "",
+			expected: true,
+		},
+		{
+			current:  "0.8",
+			support:  "0.7.15",
+			expected: true,
+		},
 	}
 	for _, cs := range cases {
-		c.Assert(validateVersion(cs.support, cs.current), gocheck.Equals, cs.expected)
+		c.Check(validateVersion(cs.support, cs.current), gocheck.Equals, cs.expected)
 	}
 }

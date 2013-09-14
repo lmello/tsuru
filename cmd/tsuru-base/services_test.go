@@ -8,7 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"github.com/globocom/tsuru/cmd"
-	"github.com/globocom/tsuru/testing"
+	"github.com/globocom/tsuru/cmd/testing"
 	"launchpad.net/gocheck"
 	"net/http"
 	"strings"
@@ -276,6 +276,7 @@ Will add a new instance of the "mongodb" service, named "tsuru_mongodb".`
 		Usage:   usage,
 		Desc:    "Create a service instance to one or more apps make use of.",
 		MinArgs: 2,
+		MaxArgs: 2,
 	}
 	command := &ServiceAdd{}
 	c.Assert(command.Info(), gocheck.DeepEquals, expected)
@@ -403,7 +404,16 @@ Service test is foo bar.
 		Stdout: &stdout,
 		Stderr: &stderr,
 	}
-	client := cmd.NewClient(&http.Client{Transport: &testing.Transport{Message: result, Status: http.StatusOK}}, nil, manager)
+	transport := testing.ConditionalTransport{
+		Transport: testing.Transport{
+			Message: result,
+			Status:  http.StatusOK,
+		},
+		CondFunc: func(r *http.Request) bool {
+			return r.Method == "GET" && r.URL.Path == "/services/foo/doc"
+		},
+	}
+	client := cmd.NewClient(&http.Client{Transport: &transport}, nil, manager)
 	err := (&ServiceDoc{}).Run(&ctx, client)
 	c.Assert(err, gocheck.IsNil)
 	obtained := stdout.String()
@@ -429,7 +439,17 @@ func (s *S) TestServiceRemoveRun(c *gocheck.C) {
 		Stderr: &stderr,
 	}
 	result := "service instance successfuly removed"
-	client := cmd.NewClient(&http.Client{Transport: &testing.Transport{Message: result, Status: http.StatusOK}}, nil, manager)
+	transport := testing.ConditionalTransport{
+		Transport: testing.Transport{
+			Message: result,
+			Status:  http.StatusOK,
+		},
+		CondFunc: func(r *http.Request) bool {
+			return r.URL.Path == "/services/instances/some-service-instance" &&
+				r.Method == "DELETE"
+		},
+	}
+	client := cmd.NewClient(&http.Client{Transport: &transport}, nil, manager)
 	err := (&ServiceRemove{}).Run(&ctx, client)
 	c.Assert(err, gocheck.IsNil)
 	obtained := stdout.String()

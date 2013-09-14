@@ -13,6 +13,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -28,6 +29,7 @@ func (e osExiter) Exit(code int) {
 
 type Manager struct {
 	Commands      map[string]Command
+	topics        map[string]string
 	name          string
 	stdout        io.Writer
 	stderr        io.Writer
@@ -51,17 +53,20 @@ func BuildBaseManager(name, version, versionHeader string) *Manager {
 	m.Register(&login{})
 	m.Register(&logout{})
 	m.Register(&userCreate{})
+	m.Register(&resetPassword{})
 	m.Register(&userRemove{})
 	m.Register(&teamCreate{})
 	m.Register(&teamRemove{})
 	m.Register(&teamList{})
 	m.Register(&teamUserAdd{})
 	m.Register(&teamUserRemove{})
+	m.Register(teamUserList{})
 	m.Register(&changePassword{})
 	m.Register(&targetList{})
 	m.Register(&targetAdd{})
 	m.Register(&targetRemove{})
 	m.Register(&targetSet{})
+	m.RegisterTopic("target", fmt.Sprintf(targetTopic, name))
 	return m
 }
 
@@ -75,6 +80,17 @@ func (m *Manager) Register(command Command) {
 		panic(fmt.Sprintf("command already registered: %s", name))
 	}
 	m.Commands[name] = command
+}
+
+func (m *Manager) RegisterTopic(name, content string) {
+	if m.topics == nil {
+		m.topics = make(map[string]string)
+	}
+	_, found := m.topics[name]
+	if found {
+		panic(fmt.Sprintf("topic already registered: %s", name))
+	}
+	m.topics[name] = content
 }
 
 func (m *Manager) Run(args []string) {
@@ -101,7 +117,8 @@ func (m *Manager) Run(args []string) {
 		}
 		args = flagset.Args()
 	}
-	if len(args) < info.MinArgs && name != "help" {
+	if length := len(args); (length < info.MinArgs || (info.MaxArgs > 0 && length > info.MaxArgs)) &&
+		name != "help" {
 		m.wrong = true
 		m.original = info.Name
 		command = m.Commands["help"]
@@ -135,7 +152,7 @@ func (m *Manager) finisher() exiter {
 
 type Command interface {
 	Info() *Info
-	Run(context *Context, client Doer) error
+	Run(context *Context, client *Client) error
 }
 
 type FlaggedCommand interface {
@@ -153,6 +170,7 @@ type Context struct {
 type Info struct {
 	Name    string
 	MinArgs int
+	MaxArgs int
 	Usage   string
 	Desc    string
 }
@@ -168,21 +186,27 @@ func (c *help) Info() *Info {
 	}
 }
 
-func (c *help) Run(context *Context, client Doer) error {
+func (c *help) Run(context *Context, client *Client) error {
 	output := fmt.Sprintf("%s version %s.\n\n", c.manager.name, c.manager.version)
 	if c.manager.wrong {
-		output += fmt.Sprintf("ERROR: not enough arguments to call %s.\n\n", c.manager.original)
+		output += fmt.Sprint("ERROR: wrong number of arguments.\n\n")
 	}
 	if len(context.Args) > 0 {
-		cmd, ok := c.manager.Commands[context.Args[0]]
-		if !ok {
-			return fmt.Errorf("Error: command %q does not exist.", context.Args[0])
-		}
-		info := cmd.Info()
-		output += fmt.Sprintf("Usage: %s %s\n", c.manager.name, info.Usage)
-		output += fmt.Sprintf("\n%s\n", info.Desc)
-		if info.MinArgs > 0 {
-			output += fmt.Sprintf("\nMinimum arguments: %d\n", info.MinArgs)
+		if cmd, ok := c.manager.Commands[context.Args[0]]; ok {
+			info := cmd.Info()
+			output += fmt.Sprintf("Usage: %s %s\n", c.manager.name, info.Usage)
+			output += fmt.Sprintf("\n%s\n", info.Desc)
+			if info.MinArgs > 0 {
+				output += fmt.Sprintf("\nMinimum # of arguments: %d", info.MinArgs)
+			}
+			if info.MaxArgs > 0 {
+				output += fmt.Sprintf("\nMaximum # of arguments: %d", info.MaxArgs)
+			}
+			output += fmt.Sprint("\n")
+		} else if topic, ok := c.manager.topics[context.Args[0]]; ok {
+			output += topic
+		} else {
+			return fmt.Errorf("command %q does not exist.", context.Args[0])
 		}
 	} else {
 		output += fmt.Sprintf("Usage: %s %s\n\nAvailable commands:\n", c.manager.name, c.Info().Usage)
@@ -194,7 +218,14 @@ func (c *help) Run(context *Context, client Doer) error {
 		for _, command := range commands {
 			output += fmt.Sprintf("  %s\n", command)
 		}
-		output += fmt.Sprintf("\nRun %s help <commandname> to get more information about a specific command.\n", c.manager.name)
+		output += fmt.Sprintf("\nUse %s help <commandname> to get more information about a command.\n", c.manager.name)
+		if len(c.manager.topics) > 0 {
+			output += fmt.Sprintln("\nAvailable topics:")
+			for topic := range c.manager.topics {
+				output += fmt.Sprintf("  %s\n", topic)
+			}
+			output += fmt.Sprintf("\nUse %s help <topicname> to get more information about a topic.\n", c.manager.name)
+		}
 	}
 	io.WriteString(context.Stdout, output)
 	return nil
@@ -213,7 +244,7 @@ func (c *version) Info() *Info {
 	}
 }
 
-func (c *version) Run(context *Context, client Doer) error {
+func (c *version) Run(context *Context, client *Client) error {
 	fmt.Fprintf(context.Stdout, "%s version %s.\n", c.manager.name, c.manager.version)
 	return nil
 }
@@ -239,6 +270,9 @@ func validateVersion(supported, current string) bool {
 		bigger bool
 		limit  int
 	)
+	if supported == "" {
+		return true
+	}
 	partsSupported := strings.Split(supported, ".")
 	partsCurrent := strings.Split(current, ".")
 	if len(partsSupported) > len(partsCurrent) {
@@ -248,8 +282,19 @@ func validateVersion(supported, current string) bool {
 		limit = len(partsSupported)
 	}
 	for i := 0; i < limit; i++ {
-		if partsCurrent[i] < partsSupported[i] {
+		current, err := strconv.Atoi(partsCurrent[i])
+		if err != nil {
 			return false
+		}
+		supported, err := strconv.Atoi(partsSupported[i])
+		if err != nil {
+			return false
+		}
+		if current < supported {
+			return false
+		}
+		if current > supported {
+			return true
 		}
 	}
 	if bigger {

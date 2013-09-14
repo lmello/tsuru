@@ -1,4 +1,4 @@
-// Copyright 2012 tsuru authors. All rights reserved.
+// Copyright 2013 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -58,27 +58,22 @@ func OpenRepository(p string) (*Repository, error) {
 	return nil, errors.New("Repository not found.")
 }
 
-// GetRemoteUrl returns the URL of a remote by its name. Or an error, if the
+// RemoteURL returns the URL of a remote by its name. Or an error, if the
 // remote is not declared.
-func (r *Repository) GetRemoteUrl(name string) (string, error) {
-	var next bool
+func (r *Repository) RemoteURL(name string) (string, error) {
 	config, err := os.Open(path.Join(r.path, "config"))
 	if err != nil {
 		return "", err
 	}
 	defer config.Close()
-	line := fmt.Sprintf("[remote %q]\n", name)
-	reader := bufio.NewReader(config)
-	l, err := reader.ReadString('\n')
-	for err == nil {
-		if next {
-			url := strings.Split(l, " = ")[1]
-			return strings.TrimSpace(url), nil
+	line := fmt.Sprintf("[remote %q]", name)
+	scanner := bufio.NewScanner(config)
+	scanner.Split(bufio.ScanLines)
+	for scanner.Scan() {
+		if scanner.Text() == line {
+			scanner.Scan()
+			return strings.Split(scanner.Text(), " = ")[1], nil
 		}
-		if l == line {
-			next = true
-		}
-		l, err = reader.ReadString('\n')
 	}
 	return "", fmt.Errorf("Remote %q not found.", name)
 }

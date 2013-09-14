@@ -8,14 +8,14 @@ import (
 	"code.google.com/p/go.crypto/bcrypt"
 	"github.com/globocom/config"
 	"github.com/globocom/tsuru/db"
+	ttesting "github.com/globocom/tsuru/testing"
 	"io"
+	"io/ioutil"
 	"launchpad.net/gocheck"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -51,6 +51,7 @@ type S struct {
 	user    *User
 	team    *Team
 	token   *Token
+	server  *ttesting.SMTPServer
 	gitRoot string
 	gitHost string
 	gitPort string
@@ -60,17 +61,15 @@ type S struct {
 var _ = gocheck.Suite(&S{})
 
 func (s *S) SetUpSuite(c *gocheck.C) {
-	config.Set("auth:salt", "tsuru-salt")
 	config.Set("auth:token-expire-days", 2)
-	config.Set("auth:token-key", "TSURU-KEY")
 	config.Set("auth:hash-cost", bcrypt.MinCost)
 	config.Set("admin-team", "admin")
-	s.hashed = hashPassword("123")
 	config.Set("database:url", "127.0.0.1:27017")
 	config.Set("database:name", "tsuru_auth_test")
 	s.conn, _ = db.Conn()
 	s.user = &User{Email: "timeredbull@globo.com", Password: "123456"}
 	s.user.Create()
+	s.hashed = s.user.Password
 	s.token, _ = s.user.CreateToken("123456")
 	team := &Team{Name: "cobrateam", Users: []string{s.user.Email}}
 	err := s.conn.Teams().Insert(team)
@@ -79,10 +78,16 @@ func (s *S) SetUpSuite(c *gocheck.C) {
 	s.gitHost, _ = config.GetString("git:host")
 	s.gitPort, _ = config.GetString("git:port")
 	s.gitProt, _ = config.GetString("git:protocol")
+	s.server, err = ttesting.NewSMTPServer()
+	c.Assert(err, gocheck.IsNil)
+	config.Set("smtp:server", s.server.Addr())
+	config.Set("smtp:user", "root")
+	config.Set("smtp:password", "123456")
 }
 
 func (s *S) TearDownSuite(c *gocheck.C) {
 	s.conn.Apps().Database.DropDatabase()
+	s.server.Stop()
 }
 
 func (s *S) TearDownTest(c *gocheck.C) {
@@ -94,8 +99,8 @@ func (s *S) TearDownTest(c *gocheck.C) {
 	config.Set("git:host", s.gitHost)
 	config.Set("git:port", s.gitPort)
 	config.Set("git:protocol", s.gitProt)
-	salt = ""
-	tokenKey = ""
+	cost = 0
+	tokenExpire = 0
 }
 
 func (s *S) getTestData(path ...string) io.ReadCloser {
@@ -106,17 +111,34 @@ func (s *S) getTestData(path ...string) io.ReadCloser {
 }
 
 // starts a new httptest.Server and returns it
-// Also changes git:host, git:port and git:protocol to match the server's url
+// Also changes git:api-server to match the server's url
 func (s *S) startGandalfTestServer(h http.Handler) *httptest.Server {
 	ts := httptest.NewServer(h)
-	pieces := strings.Split(ts.URL, "://")
-	protocol := pieces[0]
-	hostPart := strings.Split(pieces[1], ":")
-	port := hostPart[1]
-	host := hostPart[0]
-	config.Set("git:host", host)
-	portInt, _ := strconv.ParseInt(port, 10, 0)
-	config.Set("git:port", portInt)
-	config.Set("git:protocol", protocol)
+	config.Set("git:api-server", ts.URL)
 	return ts
+}
+
+type testHandler struct {
+	body    [][]byte
+	method  []string
+	url     []string
+	content string
+	header  []http.Header
+}
+
+func (h *testHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.method = append(h.method, r.Method)
+	h.url = append(h.url, r.URL.String())
+	b, _ := ioutil.ReadAll(r.Body)
+	h.body = append(h.body, b)
+	h.header = append(h.header, r.Header)
+	w.Write([]byte(h.content))
+}
+
+type testBadHandler struct {
+	content string
+}
+
+func (h *testBadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, h.content, http.StatusInternalServerError)
 }

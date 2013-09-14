@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package collector
 
 import (
 	"github.com/globocom/tsuru/app"
@@ -50,6 +50,7 @@ func update(units []provision.Unit) {
 				log.Printf("collector: app %q not found. Skipping.\n", unit.AppName)
 				continue
 			}
+			l.Add(a, index)
 		}
 		u := app.Unit{}
 		u.Name = unit.Name
@@ -57,11 +58,11 @@ func update(units []provision.Unit) {
 		u.Machine = unit.Machine
 		u.InstanceId = unit.InstanceId
 		u.Ip = unit.Ip
+		if unit.Status == provision.StatusStarted && a.State == "" {
+			a.State = "ready"
+		}
 		u.State = string(unit.Status)
 		a.AddUnit(&u)
-		if index > -1 {
-			l.Add(a, index)
-		}
 	}
 	conn, err := db.Conn()
 	if err != nil {
@@ -70,7 +71,10 @@ func update(units []provision.Unit) {
 	}
 	defer conn.Close()
 	for _, a := range l {
-		a.Ip, _ = app.Provisioner.Addr(a)
+		a.Ip, err = app.Provisioner.Addr(a)
+		if err != nil {
+			log.Printf("collector failed to get app (%q) address: %s", a.Name, err)
+		}
 		conn.Apps().Update(bson.M{"name": a.Name}, a)
 	}
 }

@@ -6,19 +6,31 @@ package cmd
 
 import (
 	"bytes"
+	ttesting "github.com/globocom/tsuru/cmd/testing"
 	"github.com/globocom/tsuru/fs/testing"
-	ttesting "github.com/globocom/tsuru/testing"
 	"launchpad.net/gocheck"
 	"net/http"
 )
 
+func (s *S) TestShouldSetCloseToTrue(c *gocheck.C) {
+	request, err := http.NewRequest("GET", "/", nil)
+	c.Assert(err, gocheck.IsNil)
+	transport := ttesting.Transport{
+		Status:  http.StatusOK,
+		Message: "OK",
+	}
+	client := NewClient(&http.Client{Transport: &transport}, nil, manager)
+	client.Do(request)
+	c.Assert(request.Close, gocheck.Equals, true)
+}
+
 func (s *S) TestShouldReturnBodyMessageOnError(c *gocheck.C) {
 	request, err := http.NewRequest("GET", "/", nil)
 	c.Assert(err, gocheck.IsNil)
-
 	client := NewClient(&http.Client{Transport: &ttesting.Transport{Message: "You must be authenticated to execute this command.", Status: http.StatusUnauthorized}}, nil, manager)
 	response, err := client.Do(request)
-	c.Assert(response, gocheck.IsNil)
+	c.Assert(response, gocheck.NotNil)
+	c.Assert(err, gocheck.NotNil)
 	c.Assert(err.Error(), gocheck.Equals, "You must be authenticated to execute this command.")
 }
 
@@ -63,7 +75,7 @@ func (s *S) TestShouldIncludeTheHeaderAuthorizationWhenTsuruTokenFileExists(c *g
 	client := NewClient(&http.Client{Transport: &trans}, nil, manager)
 	_, err = client.Do(request)
 	c.Assert(err, gocheck.IsNil)
-	c.Assert(request.Header.Get("Authorization"), gocheck.Equals, "mytoken")
+	c.Assert(request.Header.Get("Authorization"), gocheck.Equals, "bearer mytoken")
 }
 
 func (s *S) TestShouldValidateVersion(c *gocheck.C) {
@@ -86,17 +98,17 @@ func (s *S) TestShouldValidateVersion(c *gocheck.C) {
 	client := NewClient(&http.Client{Transport: &trans}, &context, &manager)
 	_, err = client.Do(request)
 	c.Assert(err, gocheck.IsNil)
-	expected := `############################################################
+	expected := `################################################################
 
 WARNING: You're using an unsupported version of glb.
 
 You must have at least version 0.3, your current
 version is 0.2.1.
 
-Please go to http://tsuru.rtfd.org/client-install and
-download the last version.
+Please go to http://docs.tsuru.io/en/latest/install/client.html
+and download the last version.
 
-############################################################
+################################################################
 
 `
 	c.Assert(buf.String(), gocheck.Equals, expected)

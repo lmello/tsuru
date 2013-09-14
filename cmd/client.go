@@ -13,12 +13,8 @@ import (
 	"net/url"
 )
 
-type Doer interface {
-	Do(request *http.Request) (*http.Response, error)
-}
-
 type Client struct {
-	HttpClient     *http.Client
+	HTTPClient     *http.Client
 	context        *Context
 	progname       string
 	currentVersion string
@@ -27,7 +23,7 @@ type Client struct {
 
 func NewClient(client *http.Client, context *Context, manager *Manager) *Client {
 	return &Client{
-		HttpClient:     client,
+		HTTPClient:     client,
 		context:        context,
 		progname:       manager.name,
 		currentVersion: manager.version,
@@ -51,25 +47,26 @@ func (c *Client) detectClientError(err error) error {
 
 func (c *Client) Do(request *http.Request) (*http.Response, error) {
 	if token, err := readToken(); err == nil {
-		request.Header.Set("Authorization", token)
+		request.Header.Set("Authorization", "bearer "+token)
 	}
-	response, err := c.HttpClient.Do(request)
+	request.Close = true
+	response, err := c.HTTPClient.Do(request)
 	err = c.detectClientError(err)
 	if err != nil {
 		return nil, err
 	}
 	supported := response.Header.Get(c.versionHeader)
-	format := `############################################################
+	format := `################################################################
 
 WARNING: You're using an unsupported version of %s.
 
 You must have at least version %s, your current
 version is %s.
 
-Please go to http://tsuru.rtfd.org/client-install and
-download the last version.
+Please go to http://docs.tsuru.io/en/latest/install/client.html
+and download the last version.
 
-############################################################
+################################################################
 
 `
 	if !validateVersion(supported, c.currentVersion) {
@@ -78,7 +75,7 @@ download the last version.
 	if response.StatusCode > 399 {
 		defer response.Body.Close()
 		result, _ := ioutil.ReadAll(response.Body)
-		return nil, errors.New(string(result))
+		return response, errors.New(string(result))
 	}
 	return response, nil
 }

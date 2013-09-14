@@ -49,16 +49,16 @@ use-tls
 ``use-tls`` indicates whether tsuru should use TLS or not. This setting is
 optional, and defaults to "false".
 
-tls-cert-file
+tls:cert-file
 +++++++++++++
 
-``tlscert-file`` is the path to the X.509 certificate file configured to serve
+``tls:cert-file`` is the path to the X.509 certificate file configured to serve
 the domain.  This setting is optional, unless ``use-tls`` is true.
 
-tls-key-file
+tls:key-file
 ++++++++++++
 
-``tls-key-file`` is the path to private key file configured to serve the
+``tls:key-file`` is the path to private key file configured to serve the
 domain. This setting is optional, unless ``use-tls`` is true.
 
 Database access
@@ -86,12 +86,38 @@ database:name
 ``database:name`` is the name of the database that tsuru uses. It is a
 mandatory setting and has no default value. An example of value is "tsuru".
 
+Email configuration
+-------------------
+
+Tsuru sends email to users when they request password recovery. In order to
+send those emails, Tsuru needs to be configured with some SMTP settings.
+Omiting these settings won't break Tsuru, but users would not be able to reset
+their password automattically.
+
+smtp:server
++++++++++++
+
+The SMTP server to connect to. It must be in the form <host>:<port>. Example:
+"smtp.gmail.com:587".
+
+smtp:user
++++++++++
+
+The user to authenticate with the SMTP sever. Currently, Tsuru requires
+authenticated sessions.
+
+smtp:password
++++++++++++++
+
+The password for authentication within the SMTP server.
+
 Git configuration
 -----------------
 
 Tsuru uses `Gandalf <https://github.com/globocom/gandalf>`_ to manage git
 repositories. Gandalf exposes a REST API for repositories management, and tsuru
-uses it. So tsuru requires information about the Gandalf HTTP server.
+uses it. So tsuru requires information about the Gandalf HTTP server, and also
+its git-daemon and SSH service.
 
 Tsuru also needs to know where the git repository will be cloned and stored in
 units storage. Here are all options related to git repositories:
@@ -105,25 +131,27 @@ applications will be stored in their units. Example of value:
 ``/home/application/current``.
 
 
-git:host
-++++++++
+git:api-server
+++++++++++++++
 
-``git:host`` is the host for the Gandalf API. It should include the host name
-only, not the schema nor the port. This setting is mandatory and has no default
-value. Examples of value: ``localhost`` and ``gandalf.tsuru.io``.
+``git:api-server`` is the address of the Gandalf API. It should define the
+entire address, including protocol and port. Examples of value:
+``http://localhost:9090`` and ``https://gandalf.tsuru.io:9595``.
 
-git:port
-++++++++
+git:rw-host
++++++++++++
 
-``git:port`` is the port for the Gandalf API. Its value must be a positive
-integer. This setting is optional and defaults to "80".
+``git:rw-host`` is the host that will be used to build the push URL. For
+example, when the value is "tsuruhost.com", the push URL will be something like
+git@tsuruhost.com:<app-name>.git.
 
-git:protocol
-++++++++++++
+git:ro-host
++++++++++++
 
-``git:protocol`` is the protocol to communicate with Gandalf API. The value may
-be ``http`` or ``https``, all lower cased. This setting is optional and
-defaults to "http".
+``git:ro-host`` is the host that units will use to clone code from users
+applications. It's used to build the read only URL of the repository. For
+example, when the value is "tsuruhost.com", the read-only URL will be something
+like git://tsuruhost.com/<app-name>.git.
 
 Authentication configuration
 ----------------------------
@@ -131,9 +159,18 @@ Authentication configuration
 Tsuru has its own authentication mechanism, that hashes passwords brcypt.
 Tokens are generated during authentication, and are hashed using SHA512.
 
-This mechanism requires three settings to operate: ``auth:hash-cost``,
-``auth:token-expire-days`` and ``auth:token-key``. Each setting is described
-below:
+This mechanism requires two settings to operate: ``auth:hash-cost`` and
+``auth:token-expire-days``. Each setting is described below.
+
+The ``auth`` section also controls whether user registation is on or off. When
+user registration is off, the user creation URL is not registered in the
+server.
+
+auth:user-registration
+++++++++++++++++++++++
+
+This flag indicates whether user registration is enabled. This setting is
+optional, and defaults to false.
 
 auth:hash-cost
 ++++++++++++++
@@ -149,12 +186,11 @@ Whenever a user logs in, tsuru generates a token for him/her, and the user may
 store the token. ``auth:token-expire-days`` setting defines the amount of days
 that the token will be valid. This setting is optional, and defaults to "7".
 
-auth:token-key
-++++++++++++++
+auth:max-simultaneous-sessions
+++++++++++++++++++++++++++++++
 
-``auth:token-key`` is the key used for token hashing, during authentication
-process. If this value changes, all tokens will expire. This setting is
-required, and has no default value.
+Tsuru can limit the number of simultaneous sessions per user. This setting is
+optional, and defaults to "unlimited".
 
 Amazon Web Services (AWS) configuration
 ---------------------------------------
@@ -269,6 +305,31 @@ admin-team
 ``admin-team`` is the name of the administration team for the current tsuru
 installation. All members of the administration team is able to use the
 ``tsuru-admin`` command.
+
+Quota management
+----------------
+
+Tsuru can, optionally, manage quotas. Currently, there are two available
+quotas: apps per user and units per app.
+
+Tsuru administrators can control the default quota for new users and new apps
+in the configuration file, and use ``tsuru-admin`` command to change quotas for
+users or apps. Quota management is disabled by default, to enable it, just set
+the desired quota to a positive integer.
+
+quota:units-per-app
++++++++++++++++++++
+
+``quota:units-per-app`` is the default value for units per-app quota. All new
+apps will have at most the number of units specified by this setting. This
+setting is optional, and defaults to "unlimited".
+
+quota:apps-per-user
++++++++++++++++++++
+
+``quota:apps-per-user`` is the default value for apps per-user quota. All new
+users will have at most the number of apps specified by this setting. This
+setting is optional, and defaults to "unlimited".
 
 Defining the provisioner
 ------------------------
@@ -450,8 +511,9 @@ Here is a complete example, with S3, VPC, HTTP/TLS and load balacing enabled:
 
     listen: ":8080"
     use-tls: true
-    tls-cert-file: /etc/tsuru/tls/cert.pem
-    tls-key-file: /etc/tsuru/tls/key.pem
+    tls:
+      cert-file: /etc/tsuru/tls/cert.pem
+      key-file: /etc/tsuru/tls/key.pem
     host: http://10.19.2.238:8080
     database:
       url: 127.0.0.1:27017
@@ -462,9 +524,7 @@ Here is a complete example, with S3, VPC, HTTP/TLS and load balacing enabled:
       port: 8000
       protocol: http
     auth:
-      salt: salt
       token-expire-days: 14
-      token-key: key
     bucket-support: true
     aws:
       access-key-id: access-key

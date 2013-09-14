@@ -12,6 +12,7 @@ import (
 	"github.com/globocom/tsuru/db"
 	"github.com/globocom/tsuru/errors"
 	"github.com/globocom/tsuru/service"
+	ttesting "github.com/globocom/tsuru/testing"
 	"labix.org/v2/mgo/bson"
 	"launchpad.net/gocheck"
 	"net/http"
@@ -39,13 +40,13 @@ func (s *S) SetUpSuite(c *gocheck.C) {
 	config.Set("database:url", "127.0.0.1:27017")
 	config.Set("database:name", "tsuru_service_bind_test")
 	config.Set("auth:salt", "test_salt")
-	config.Set("auth:token-key", "test_key")
 	s.conn, err = db.Conn()
 	c.Assert(err, gocheck.IsNil)
 	s.user = auth.User{Email: "sad-but-true@metallica.com"}
 	s.user.Create()
 	s.team = auth.Team{Name: "metallica", Users: []string{s.user.Email}}
 	s.conn.Teams().Insert(s.team)
+	app.Provisioner = ttesting.NewFakeProvisioner()
 }
 
 func (s *S) TearDownSuite(c *gocheck.C) {
@@ -54,10 +55,10 @@ func (s *S) TearDownSuite(c *gocheck.C) {
 
 func createTestApp(conn *db.Storage, name, framework string, teams []string, units []app.Unit) (app.App, error) {
 	a := app.App{
-		Name:      name,
-		Framework: framework,
-		Teams:     teams,
-		Units:     units,
+		Name:     name,
+		Platform: framework,
+		Teams:    teams,
+		Units:    units,
 	}
 	err := conn.Apps().Insert(&a)
 	return a, err
@@ -226,7 +227,7 @@ func (s *S) TestBindReturnConflictIfTheAppIsAlreadyBound(c *gocheck.C) {
 	defer s.conn.Apps().Remove(bson.M{"name": a.Name})
 	err = instance.BindApp(&a)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusConflict)
 	c.Assert(e, gocheck.ErrorMatches, "^This app is already bound to this service instance.$")
@@ -250,7 +251,7 @@ func (s *S) TestBindReturnsPreconditionFailedIfTheAppDoesNotHaveAnUnitAndService
 	defer s.conn.Apps().Remove(bson.M{"name": a.Name})
 	err = instance.BindApp(&a)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusPreconditionFailed)
 	c.Assert(e.Message, gocheck.Equals, "This app does not have an IP yet.")
@@ -465,7 +466,7 @@ func (s *S) TestUnbindReturnsPreconditionFailedIfTheAppIsNotBoundToTheInstance(c
 	defer s.conn.Apps().Remove(bson.M{"name": a.Name})
 	err = instance.UnbindApp(&a)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e, gocheck.ErrorMatches, "^This app is not bound to this service instance.$")
 }

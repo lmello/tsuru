@@ -20,12 +20,13 @@ Install the tsuru client
 :doc:`Install the Tsuru client </install/client>` for your development platform.
 
 The the Tsuru client is a command-line tool for creating and managing apps.
+Check out the :doc:`CLI usage guide </apps/client/usage>` to learn more.
 
 Sign up
 +++++++
 
 To create an account, you use the `user-create
-<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#Create_a_user>`_
+<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#hdr-Create_a_user>`_
 command:
 
 .. highlight:: bash
@@ -40,7 +41,7 @@ Login
 +++++
 
 To login in tsuru, you use the `login
-<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#Authenticate_within_remote_tsuru_server>`_
+<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#hdr-Authenticate_within_remote_tsuru_server>`_
 command, you will be asked for your password:
 
 .. highlight:: bash
@@ -57,3 +58,5 @@ Choose from the following getting started tutorials to learn how to deploy your
 first application using a supported language or framework:
 
 * :doc:`Deploying Python applications in tsuru </apps/quickstart/python>`
+* :doc:`Deploying Ruby/Rails applications in tsuru </apps/quickstart/ruby>`
+* :doc:`Deploying PHP applications in tsuru </apps/quickstart/php>`

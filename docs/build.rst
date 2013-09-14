@@ -126,25 +126,18 @@ available only for Linux 64 bits, so make sure that ``uname -m`` prints
     $ uname -m
     x86_64
 
-Then download and install the binaries. First, collector:
+Then download and install the tsr binary:
 
 .. highlight:: bash
 
 ::
 
-    $ curl -sL https://s3.amazonaws.com/tsuru/dist-server/tsuru-collector.tar.gz | sudo tar -xz -C /usr/bin
+    $ curl -sL https://s3.amazonaws.com/tsuru/dist-server/tsr.tar.gz | sudo tar -xz -C /usr/bin
 
-Then the API server:
 
-.. highlight:: bash
-
-::
-
-    $ curl -sL https://s3.amazonaws.com/tsuru/dist-server/tsuru-api.tar.gz | sudo tar -xz -C /usr/bin
-
-These commands will install ``collector`` and ``api`` commands in ``/usr/bin``
-(you will need to be a sudoer and provide your password). You may install these
-commands somewhere else in your ``PATH``.
+These commands will install ``tsr`` in ``/usr/bin``
+(you will need to be a sudoer and provide your password). You may install this
+command in your ``PATH``.
 
 Installing from source
 ======================
@@ -159,7 +152,7 @@ To build tsuru from source you will need to install the following packages
 
     $ sudo apt-get install -y golang-go git mercurial bzr gcc
 
-1. Install the tsuru api
+1. Install the tsuru tsr
 
 Add the following lines to your ~/.bashrc:
 
@@ -177,8 +170,7 @@ Then execute:
 ::
 
     $ source ~/.bashrc
-    $ go get github.com/globocom/tsuru/api
-    $ go get github.com/globocom/tsuru/collector
+    $ go get github.com/globocom/tsuru/tsr
 
 Configuring tsuru
 =================
@@ -203,7 +195,7 @@ configuration, AWS credentials, etc.) before running tsuru.
 Running tsuru
 =============
 
-Now that you have ``api`` and ``collector`` properly installed, and you
+Now that you have ``tsr`` properly installed, and you
 :doc:`configured tsuru </config>`, you're three steps away from running it.
 
 1. Start mongodb
@@ -222,14 +214,14 @@ Now that you have ``api`` and ``collector`` properly installed, and you
 
     $ sudo service beanstalkd start
 
-3. Start tsuru and collector
+3. Start api and collector
 
 .. highlight:: bash
 
 ::
 
-    $ api &
-    $ collector &
+    $ tsr api &
+    $ tsr collector &
 
 One can see the logs in:
 

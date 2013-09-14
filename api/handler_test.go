@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package api
 
 import (
 	stderrors "errors"
@@ -29,7 +29,6 @@ func (s *HandlerSuite) SetUpSuite(c *gocheck.C) {
 	config.Set("database:url", "127.0.0.1:27017")
 	config.Set("database:name", "tsuru_api_handler_test")
 	config.Set("auth:salt", "tsuru-salt")
-	config.Set("auth:token-key", "key")
 	config.Set("auth:hash-cost", 4)
 	s.conn, err = db.Conn()
 	c.Assert(err, gocheck.IsNil)
@@ -60,7 +59,7 @@ func errorHandlerWriteHeader(w http.ResponseWriter, r *http.Request) error {
 }
 
 func badRequestHandler(w http.ResponseWriter, r *http.Request) error {
-	return &errors.Http{Code: http.StatusBadRequest, Message: "some error"}
+	return &errors.HTTP{Code: http.StatusBadRequest, Message: "some error"}
 }
 
 func simpleHandler(w http.ResponseWriter, r *http.Request) error {
@@ -140,6 +139,7 @@ func (s *HandlerSuite) TestHandlerShouldSetVersionHeaders(c *gocheck.C) {
 	handler(simpleHandler).ServeHTTP(recorder, request)
 	c.Assert(recorder.Header().Get("Supported-Tsuru"), gocheck.Equals, tsuruMin)
 	c.Assert(recorder.Header().Get("Supported-Crane"), gocheck.Equals, craneMin)
+	c.Assert(recorder.Header().Get("Supported-Tsuru-Admin"), gocheck.Equals, tsuruAdminMin)
 }
 
 func (s *HandlerSuite) TestHandlerShouldSetVersionHeadersEvenOnFail(c *gocheck.C) {
@@ -175,7 +175,7 @@ func (s *HandlerSuite) TestAuthorizationRequiredHandlerShouldReturnTheHandlerRes
 	recorder := httptest.NewRecorder()
 	request, err := http.NewRequest("GET", "/apps", nil)
 	c.Assert(err, gocheck.IsNil)
-	request.Header.Set("Authorization", s.token.Token)
+	request.Header.Set("Authorization", "bearer "+s.token.Token)
 	authorizationRequiredHandler(authorizedSimpleHandler).ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, gocheck.Equals, http.StatusOK)
 	c.Assert(recorder.Body.String(), gocheck.Equals, "success")
@@ -205,7 +205,7 @@ func (s *HandlerSuite) TestAuthorizationRequiredHandlerShouldReturnTheHandlerErr
 	recorder := httptest.NewRecorder()
 	request, err := http.NewRequest("GET", "/apps", nil)
 	c.Assert(err, gocheck.IsNil)
-	request.Header.Set("Authorization", s.token.Token)
+	request.Header.Set("Authorization", "bearer "+s.token.Token)
 	authorizationRequiredHandler(authorizedErrorHandler).ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, gocheck.Equals, http.StatusInternalServerError)
 	c.Assert(recorder.Body.String(), gocheck.Equals, "some error\n")
@@ -215,7 +215,7 @@ func (s *HandlerSuite) TestAuthorizetionRequiredHandlerDontCallWriteHeaderIfItHa
 	recorder := recorder{httptest.NewRecorder(), 0}
 	request, err := http.NewRequest("GET", "/apps", nil)
 	c.Assert(err, gocheck.IsNil)
-	request.Header.Set("Authorization", s.token.Token)
+	request.Header.Set("Authorization", "bearer "+s.token.Token)
 	authorizationRequiredHandler(authorizedErrorHandlerWriteHeader).ServeHTTP(&recorder, request)
 	c.Assert(recorder.Code, gocheck.Equals, http.StatusBadGateway)
 	c.Assert(recorder.Body.String(), gocheck.Equals, "some error\n")
@@ -226,7 +226,7 @@ func (s *HandlerSuite) TestAuthorizationRequiredHandlerShouldRespectTheHandlerSt
 	recorder := httptest.NewRecorder()
 	request, err := http.NewRequest("GET", "/apps", nil)
 	c.Assert(err, gocheck.IsNil)
-	request.Header.Set("Authorization", s.token.Token)
+	request.Header.Set("Authorization", "bearer "+s.token.Token)
 	authorizationRequiredHandler(authorizedBadRequestHandler).ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, gocheck.Equals, http.StatusBadRequest)
 }
@@ -250,7 +250,7 @@ func (s *HandlerSuite) TestAdminRequiredHandlerShouldReturnUnauthorizedIfTheToke
 	c.Assert(recorder.Body.String(), gocheck.Equals, "Invalid token\n")
 }
 
-func (s *HandlerSuite) TestADminRequiredHandlerShouldReturnForbiddenIfTheUserIsNotAdmin(c *gocheck.C) {
+func (s *HandlerSuite) TestAdminRequiredHandlerShouldReturnForbiddenIfTheUserIsNotAdmin(c *gocheck.C) {
 	user := &auth.User{Email: "rain@gotthard.com", Password: "123456"}
 	err := user.Create()
 	c.Assert(err, gocheck.IsNil)
@@ -261,7 +261,7 @@ func (s *HandlerSuite) TestADminRequiredHandlerShouldReturnForbiddenIfTheUserIsN
 	recorder := httptest.NewRecorder()
 	request, err := http.NewRequest("GET", "/apps", nil)
 	c.Assert(err, gocheck.IsNil)
-	request.Header.Set("Authorization", token.Token)
+	request.Header.Set("Authorization", "bearer "+token.Token)
 	adminRequiredHandler(authorizedSimpleHandler).ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, gocheck.Equals, http.StatusForbidden)
 	c.Assert(recorder.Body.String(), gocheck.Equals, "Forbidden\n")
@@ -271,7 +271,7 @@ func (s *HandlerSuite) TestAdminRequiredHandlerShouldReturnTheHandlerResultIfThe
 	recorder := httptest.NewRecorder()
 	request, err := http.NewRequest("GET", "/apps", nil)
 	c.Assert(err, gocheck.IsNil)
-	request.Header.Set("Authorization", s.token.Token)
+	request.Header.Set("Authorization", "bearer "+s.token.Token)
 	adminRequiredHandler(authorizedSimpleHandler).ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, gocheck.Equals, http.StatusOK)
 	c.Assert(recorder.Body.String(), gocheck.Equals, "success")
@@ -281,7 +281,7 @@ func (s *HandlerSuite) TestAdminRequiredHandlerShouldSetVersionHeaders(c *gochec
 	recorder := httptest.NewRecorder()
 	request, err := http.NewRequest("GET", "/apps", nil)
 	c.Assert(err, gocheck.IsNil)
-	request.Header.Set("Authorization", s.token.Token)
+	request.Header.Set("Authorization", "bearer "+s.token.Token)
 	adminRequiredHandler(authorizedSimpleHandler).ServeHTTP(recorder, request)
 	c.Assert(recorder.Header().Get("Supported-Tsuru"), gocheck.Equals, tsuruMin)
 	c.Assert(recorder.Header().Get("Supported-Crane"), gocheck.Equals, craneMin)
@@ -301,7 +301,7 @@ func (s *HandlerSuite) TestAdminRequiredHandlerShouldReturnTheHandlerErrorIfAnyH
 	recorder := httptest.NewRecorder()
 	request, err := http.NewRequest("GET", "/apps", nil)
 	c.Assert(err, gocheck.IsNil)
-	request.Header.Set("Authorization", s.token.Token)
+	request.Header.Set("Authorization", "bearer "+s.token.Token)
 	adminRequiredHandler(authorizedErrorHandler).ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, gocheck.Equals, http.StatusInternalServerError)
 	c.Assert(recorder.Body.String(), gocheck.Equals, "some error\n")
@@ -311,7 +311,7 @@ func (s *HandlerSuite) TestAdminRequiredHandlerDontCallWriteHeaderIfItHasAlready
 	recorder := recorder{httptest.NewRecorder(), 0}
 	request, err := http.NewRequest("GET", "/apps", nil)
 	c.Assert(err, gocheck.IsNil)
-	request.Header.Set("Authorization", s.token.Token)
+	request.Header.Set("Authorization", "bearer "+s.token.Token)
 	adminRequiredHandler(authorizedErrorHandlerWriteHeader).ServeHTTP(&recorder, request)
 	c.Assert(recorder.Code, gocheck.Equals, http.StatusBadGateway)
 	c.Assert(recorder.Body.String(), gocheck.Equals, "some error\n")
@@ -322,7 +322,7 @@ func (s *HandlerSuite) TestAdminRequiredHandlerShouldRespectTheHandlerStatusCode
 	recorder := httptest.NewRecorder()
 	request, err := http.NewRequest("GET", "/apps", nil)
 	c.Assert(err, gocheck.IsNil)
-	request.Header.Set("Authorization", s.token.Token)
+	request.Header.Set("Authorization", "bearer "+s.token.Token)
 	adminRequiredHandler(authorizedBadRequestHandler).ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, gocheck.Equals, http.StatusBadRequest)
 }
@@ -341,9 +341,21 @@ func (s *HandlerSuite) TestAuthorizationRequiredHandlerAppToken(c *gocheck.C) {
 	recorder := httptest.NewRecorder()
 	request, err := http.NewRequest("GET", "/?:app=my-app", nil)
 	c.Assert(err, gocheck.IsNil)
-	request.Header.Set("Authorization", token.Token)
+	request.Header.Set("Authorization", "bearer "+token.Token)
 	authorizationRequiredHandler(authorizedOutputHandler).ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, gocheck.Equals, http.StatusOK)
+}
+
+func (s *HandlerSuite) TestAuthorizationRequiredHandlerWrongApp(c *gocheck.C) {
+	token, err := auth.CreateApplicationToken("my-app")
+	c.Assert(err, gocheck.IsNil)
+	defer s.conn.Tokens().Remove(bson.M{"token": token.Token})
+	recorder := httptest.NewRecorder()
+	request, err := http.NewRequest("GET", "/?:app=your-app", nil)
+	c.Assert(err, gocheck.IsNil)
+	request.Header.Set("Authorization", "bearer "+token.Token)
+	authorizationRequiredHandler(authorizedOutputHandler).ServeHTTP(recorder, request)
+	c.Assert(recorder.Code, gocheck.Equals, http.StatusUnauthorized)
 }
 
 func (s *HandlerSuite) TestAuthorizationRequiredHandlerAppMissng(c *gocheck.C) {
@@ -353,33 +365,7 @@ func (s *HandlerSuite) TestAuthorizationRequiredHandlerAppMissng(c *gocheck.C) {
 	recorder := httptest.NewRecorder()
 	request, err := http.NewRequest("GET", "/", nil)
 	c.Assert(err, gocheck.IsNil)
-	request.Header.Set("Authorization", token.Token)
-	authorizationRequiredHandler(authorizedOutputHandler).ServeHTTP(recorder, request)
-	c.Assert(recorder.Code, gocheck.Equals, http.StatusUnauthorized)
-}
-
-func (s *HandlerSuite) TestAuthorizationRequiredHandlerAppNameOnHeader(c *gocheck.C) {
-	token, err := auth.CreateApplicationToken("my-app")
-	c.Assert(err, gocheck.IsNil)
-	defer s.conn.Tokens().Remove(bson.M{"token": token.Token})
-	recorder := httptest.NewRecorder()
-	request, err := http.NewRequest("GET", "/", nil)
-	c.Assert(err, gocheck.IsNil)
-	request.Header.Set("Authorization", token.Token)
-	request.Header.Set("Token-Owner", "my-app")
+	request.Header.Set("Authorization", "bearer "+token.Token)
 	authorizationRequiredHandler(authorizedOutputHandler).ServeHTTP(recorder, request)
 	c.Assert(recorder.Code, gocheck.Equals, http.StatusOK)
-}
-
-func (s *HandlerSuite) TestAuthorizationRequiredHandlerAppTokenWrongApp(c *gocheck.C) {
-	token, err := auth.CreateApplicationToken("my-app")
-	c.Assert(err, gocheck.IsNil)
-	defer s.conn.Tokens().Remove(bson.M{"token": token.Token})
-	recorder := httptest.NewRecorder()
-	request, err := http.NewRequest("GET", "/?:app=his-app", nil)
-	c.Assert(err, gocheck.IsNil)
-	request.Header.Set("Authorization", token.Token)
-	request.Header.Set("Token-Owner", "my-app") // cannot matter
-	authorizationRequiredHandler(authorizedOutputHandler).ServeHTTP(recorder, request)
-	c.Assert(recorder.Code, gocheck.Equals, http.StatusUnauthorized)
 }

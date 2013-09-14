@@ -22,7 +22,7 @@ const (
 	regenerateApprc         = "regenerate-apprc"
 	startApp                = "start-app"
 	RegenerateApprcAndStart = "regenerate-apprc-start-app"
-	bindService             = "bind-service"
+	BindService             = "bind-service"
 
 	queueName = "tsuru-app"
 )
@@ -108,7 +108,7 @@ func handle(msg *queue.Message) {
 			return
 		}
 		msg.Delete()
-		app.serializeEnvVars()
+		app.SerializeEnvVars()
 		fallthrough
 	case startApp:
 		if msg.Action == regenerateApprc {
@@ -128,7 +128,7 @@ func handle(msg *queue.Message) {
 			return
 		}
 		msg.Delete()
-	case bindService:
+	case BindService:
 		err := bindUnit(msg)
 		if err != nil {
 			log.Print(err)

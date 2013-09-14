@@ -39,7 +39,7 @@ type Storage struct {
 }
 
 func open(addr, dbname string) (*Storage, error) {
-	sess, err := mgo.DialWithTimeout(addr, 1e9)
+	sess, err := mgo.Dial(addr)
 	if err != nil {
 		return nil, err
 	}
@@ -125,9 +125,19 @@ func (s *Storage) Apps() *mgo.Collection {
 	return c
 }
 
+// Platforms returns the platforms collection from MongoDB.
+func (s *Storage) Platforms() *mgo.Collection {
+	return s.Collection("platforms")
+}
+
 // Logs returns the logs collection from MongoDB.
 func (s *Storage) Logs() *mgo.Collection {
-	return s.Collection("logs")
+	appNameIndex := mgo.Index{Key: []string{"appname"}}
+	sourceIndex := mgo.Index{Key: []string{"source"}}
+	c := s.Collection("logs")
+	c.EnsureIndex(appNameIndex)
+	c.EnsureIndex(sourceIndex)
+	return c
 }
 
 // Services returns the services collection from MongoDB.
@@ -153,9 +163,25 @@ func (s *Storage) Tokens() *mgo.Collection {
 	return s.Collection("tokens")
 }
 
+func (s *Storage) PasswordTokens() *mgo.Collection {
+	return s.Collection("password_tokens")
+}
+
+func (s *Storage) UserActions() *mgo.Collection {
+	return s.Collection("user_actions")
+}
+
 // Teams returns the teams collection from MongoDB.
 func (s *Storage) Teams() *mgo.Collection {
 	return s.Collection("teams")
+}
+
+// Quota returns the quota collection from MongoDB.
+func (s *Storage) Quota() *mgo.Collection {
+	userIndex := mgo.Index{Key: []string{"owner"}, Unique: true}
+	c := s.Collection("quota")
+	c.EnsureIndex(userIndex)
+	return c
 }
 
 func init() {
@@ -163,7 +189,7 @@ func init() {
 	go retire(ticker)
 }
 
-// retire retires old connections :-)
+// retire retires old connections
 func retire(t *time.Ticker) {
 	for _ = range t.C {
 		now := time.Now()

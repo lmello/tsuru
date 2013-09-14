@@ -8,7 +8,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"github.com/globocom/tsuru/cmd"
-	"github.com/globocom/tsuru/testing"
+	"github.com/globocom/tsuru/cmd/testing"
 	"launchpad.net/gnuflag"
 	"launchpad.net/gocheck"
 	"net/http"
@@ -30,7 +30,7 @@ var appshortflag = &gnuflag.Flag{
 
 func (s *S) TestAppInfo(c *gocheck.C) {
 	var stdout, stderr bytes.Buffer
-	result := `{"Name":"app1","CName":"","Ip":"myapp.tsuru.io","Framework":"php","Repository":"git@git.com:php.git","State":"dead", "Units":[{"Ip":"10.10.10.10","Name":"app1/0","State":"started"}, {"Ip":"9.9.9.9","Name":"app1/1","State":"started"}, {"Ip":"","Name":"app1/2","State":"pending"}],"Teams":["tsuruteam","crane"]}`
+	result := `{"name":"app1","cname":"","ip":"myapp.tsuru.io","platform":"php","repository":"git@git.com:php.git","state":"dead", "units":[{"Ip":"10.10.10.10","Name":"app1/0","State":"started"}, {"Ip":"9.9.9.9","Name":"app1/1","State":"started"}, {"Ip":"","Name":"app1/2","State":"pending"}],"teams":["tsuruteam","crane"]}`
 	expected := `Application: app1
 Repository: git@git.com:php.git
 Platform: php
@@ -60,7 +60,7 @@ Units:
 
 func (s *S) TestAppInfoNoUnits(c *gocheck.C) {
 	var stdout, stderr bytes.Buffer
-	result := `{"Name":"app1","Ip":"app1.tsuru.io","Framework":"php","Repository":"git@git.com:php.git","State":"dead", "Units":[],"Teams":["tsuruteam","crane"]}`
+	result := `{"name":"app1","ip":"app1.tsuru.io","platform":"php","repository":"git@git.com:php.git","state":"dead","units":[],"teams":["tsuruteam","crane"]}`
 	expected := `Application: app1
 Repository: git@git.com:php.git
 Platform: php
@@ -80,9 +80,31 @@ Address: app1.tsuru.io
 	c.Assert(stdout.String(), gocheck.Equals, expected)
 }
 
+func (s *S) TestAppInfoEmptyUnit(c *gocheck.C) {
+	var stdout, stderr bytes.Buffer
+	result := `{"name":"app1","cname":"","ip":"myapp.tsuru.io","platform":"php","repository":"git@git.com:php.git","state":"dead", "units":[{"Name":"","State":""}],"teams":["tsuruteam","crane"]}`
+	expected := `Application: app1
+Repository: git@git.com:php.git
+Platform: php
+Teams: tsuruteam, crane
+Address: myapp.tsuru.io
+
+`
+	context := cmd.Context{
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}
+	client := cmd.NewClient(&http.Client{Transport: &testing.Transport{Message: result, Status: http.StatusOK}}, nil, manager)
+	command := AppInfo{}
+	command.Flags().Parse(true, []string{"--app", "app1"})
+	err := command.Run(&context, client)
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(stdout.String(), gocheck.Equals, expected)
+}
+
 func (s *S) TestAppInfoWithoutArgs(c *gocheck.C) {
 	var stdout, stderr bytes.Buffer
-	result := `{"Name":"secret","Ip":"secret.tsuru.io","Framework":"ruby","Repository":"git@git.com:php.git","State":"dead", "Units":[{"Ip":"10.10.10.10","Name":"secret/0","State":"started"}, {"Ip":"9.9.9.9","Name":"secret/1","State":"pending"}],"Teams":["tsuruteam","crane"]}`
+	result := `{"name":"secret","ip":"secret.tsuru.io","platform":"ruby","repository":"git@git.com:php.git","state":"dead","units":[{"Ip":"10.10.10.10","Name":"secret/0","State":"started"}, {"Ip":"9.9.9.9","Name":"secret/1","State":"pending"}],"Teams":["tsuruteam","crane"]}`
 	expected := `Application: secret
 Repository: git@git.com:php.git
 Platform: ruby
@@ -119,7 +141,7 @@ Units:
 
 func (s *S) TestAppInfoCName(c *gocheck.C) {
 	var stdout, stderr bytes.Buffer
-	result := `{"Name":"app1","Ip":"myapp.tsuru.io","CName":"yourapp.tsuru.io","Framework":"php","Repository":"git@git.com:php.git","State":"dead", "Units":[{"Ip":"10.10.10.10","Name":"app1/0","State":"started"}, {"Ip":"9.9.9.9","Name":"app1/1","State":"started"}, {"Ip":"","Name":"app1/2","State":"pending"}],"Teams":["tsuruteam","crane"]}`
+	result := `{"name":"app1","ip":"myapp.tsuru.io","cname":"yourapp.tsuru.io","platform":"php","repository":"git@git.com:php.git","state":"dead","units":[{"Ip":"10.10.10.10","Name":"app1/0","State":"started"}, {"Ip":"9.9.9.9","Name":"app1/1","State":"started"}, {"Ip":"","Name":"app1/2","State":"pending"}],"Teams":["tsuruteam","crane"]}`
 	expected := `Application: app1
 Repository: git@git.com:php.git
 Platform: php
@@ -259,12 +281,12 @@ If you don't provide the app name, tsuru will try to guess it.`,
 
 func (s *S) TestAppList(c *gocheck.C) {
 	var stdout, stderr bytes.Buffer
-	result := `[{"Ip":"10.10.10.10","Name":"app1","Units":[{"Name":"app1/0","State":"started"}]}]`
-	expected := `+-------------+-------------------------+-------------+
-| Application | Units State Summary     | Address     |
-+-------------+-------------------------+-------------+
-| app1        | 1 of 1 units in-service | 10.10.10.10 |
-+-------------+-------------------------+-------------+
+	result := `[{"ip":"10.10.10.10","name":"app1","ready":true,"units":[{"Name":"app1/0","State":"started"}]}]`
+	expected := `+-------------+-------------------------+-------------+--------+
+| Application | Units State Summary     | Address     | Ready? |
++-------------+-------------------------+-------------+--------+
+| app1        | 1 of 1 units in-service | 10.10.10.10 | Yes    |
++-------------+-------------------------+-------------+--------+
 `
 	context := cmd.Context{
 		Args:   []string{},
@@ -280,13 +302,13 @@ func (s *S) TestAppList(c *gocheck.C) {
 
 func (s *S) TestAppListDisplayAppsInAlphabeticalOrder(c *gocheck.C) {
 	var stdout, stderr bytes.Buffer
-	result := `[{"Ip":"10.10.10.11","Name":"sapp","Units":[{"Name":"sapp1/0","State":"started"}]},{"Ip":"10.10.10.10","Name":"app1","Units":[{"Name":"app1/0","State":"started"}]}]`
-	expected := `+-------------+-------------------------+-------------+
-| Application | Units State Summary     | Address     |
-+-------------+-------------------------+-------------+
-| app1        | 1 of 1 units in-service | 10.10.10.10 |
-| sapp        | 1 of 1 units in-service | 10.10.10.11 |
-+-------------+-------------------------+-------------+
+	result := `[{"ip":"10.10.10.11","name":"sapp","ready":true,"units":[{"Name":"sapp1/0","State":"started"}]},{"ip":"10.10.10.10","name":"app1","ready":true,"units":[{"Name":"app1/0","State":"started"}]}]`
+	expected := `+-------------+-------------------------+-------------+--------+
+| Application | Units State Summary     | Address     | Ready? |
++-------------+-------------------------+-------------+--------+
+| app1        | 1 of 1 units in-service | 10.10.10.10 | Yes    |
+| sapp        | 1 of 1 units in-service | 10.10.10.11 | Yes    |
++-------------+-------------------------+-------------+--------+
 `
 	context := cmd.Context{
 		Args:   []string{},
@@ -302,12 +324,54 @@ func (s *S) TestAppListDisplayAppsInAlphabeticalOrder(c *gocheck.C) {
 
 func (s *S) TestAppListUnitIsntStarted(c *gocheck.C) {
 	var stdout, stderr bytes.Buffer
-	result := `[{"Ip":"10.10.10.10","Name":"app1","Units":[{"Name":"app1/0","State":"pending"}]}]`
-	expected := `+-------------+-------------------------+-------------+
-| Application | Units State Summary     | Address     |
-+-------------+-------------------------+-------------+
-| app1        | 0 of 1 units in-service | 10.10.10.10 |
-+-------------+-------------------------+-------------+
+	result := `[{"ip":"10.10.10.10","name":"app1","ready":true,"units":[{"Name":"app1/0","State":"pending"}]}]`
+	expected := `+-------------+-------------------------+-------------+--------+
+| Application | Units State Summary     | Address     | Ready? |
++-------------+-------------------------+-------------+--------+
+| app1        | 0 of 1 units in-service | 10.10.10.10 | Yes    |
++-------------+-------------------------+-------------+--------+
+`
+	context := cmd.Context{
+		Args:   []string{},
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}
+	client := cmd.NewClient(&http.Client{Transport: &testing.Transport{Message: result, Status: http.StatusOK}}, nil, manager)
+	command := AppList{}
+	err := command.Run(&context, client)
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(stdout.String(), gocheck.Equals, expected)
+}
+
+func (s *S) TestAppListUnitWithoutName(c *gocheck.C) {
+	var stdout, stderr bytes.Buffer
+	result := `[{"ip":"10.10.10.10","name":"app1","ready":true,"units":[{"Name":"","State":"pending"}]}]`
+	expected := `+-------------+-------------------------+-------------+--------+
+| Application | Units State Summary     | Address     | Ready? |
++-------------+-------------------------+-------------+--------+
+| app1        | 0 of 0 units in-service | 10.10.10.10 | Yes    |
++-------------+-------------------------+-------------+--------+
+`
+	context := cmd.Context{
+		Args:   []string{},
+		Stdout: &stdout,
+		Stderr: &stderr,
+	}
+	client := cmd.NewClient(&http.Client{Transport: &testing.Transport{Message: result, Status: http.StatusOK}}, nil, manager)
+	command := AppList{}
+	err := command.Run(&context, client)
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(stdout.String(), gocheck.Equals, expected)
+}
+
+func (s *S) TestAppListNotReady(c *gocheck.C) {
+	var stdout, stderr bytes.Buffer
+	result := `[{"ip":"10.10.10.10","name":"app1","ready":false,"units":[{"Name":"","State":"pending"}]}]`
+	expected := `+-------------+-------------------------+-------------+--------+
+| Application | Units State Summary     | Address     | Ready? |
++-------------+-------------------------+-------------+--------+
+| app1        | 0 of 0 units in-service | 10.10.10.10 | No     |
++-------------+-------------------------+-------------+--------+
 `
 	context := cmd.Context{
 		Args:   []string{},
@@ -323,12 +387,12 @@ func (s *S) TestAppListUnitIsntStarted(c *gocheck.C) {
 
 func (s *S) TestAppListCName(c *gocheck.C) {
 	var stdout, stderr bytes.Buffer
-	result := `[{"Ip":"10.10.10.10","CName":"app1.tsuru.io","Name":"app1","Units":[{"Name":"app1/0","State":"started"}]}]`
-	expected := `+-------------+-------------------------+---------------+
-| Application | Units State Summary     | Address       |
-+-------------+-------------------------+---------------+
-| app1        | 1 of 1 units in-service | app1.tsuru.io |
-+-------------+-------------------------+---------------+
+	result := `[{"ip":"10.10.10.10","cname":"app1.tsuru.io","name":"app1","ready":true,"units":[{"Name":"app1/0","State":"started"}]}]`
+	expected := `+-------------+-------------------------+---------------+--------+
+| Application | Units State Summary     | Address       | Ready? |
++-------------+-------------------------+---------------+--------+
+| app1        | 1 of 1 units in-service | app1.tsuru.io | Yes    |
++-------------+-------------------------+---------------+--------+
 `
 	context := cmd.Context{
 		Args:   []string{},
@@ -440,7 +504,7 @@ func (s *S) TestSetCName(c *gocheck.C) {
 			var m map[string]string
 			err := json.NewDecoder(req.Body).Decode(&m)
 			c.Assert(err, gocheck.IsNil)
-			return req.URL.Path == "/apps/death" &&
+			return req.URL.Path == "/apps/death/cname" &&
 				req.Method == "POST" &&
 				m["cname"] == "death.evergrey.mycompany.com"
 		},
@@ -472,7 +536,7 @@ func (s *S) TestSetCNameWithoutTheFlag(c *gocheck.C) {
 			var m map[string]string
 			err := json.NewDecoder(req.Body).Decode(&m)
 			c.Assert(err, gocheck.IsNil)
-			return req.URL.Path == "/apps/corey" &&
+			return req.URL.Path == "/apps/corey/cname" &&
 				req.Method == "POST" &&
 				m["cname"] == "corey.evergrey.mycompany.com"
 		},
@@ -527,12 +591,7 @@ func (s *S) TestUnsetCName(c *gocheck.C) {
 		Transport: testing.Transport{Message: "Restarted", Status: http.StatusOK},
 		CondFunc: func(req *http.Request) bool {
 			called = true
-			var m map[string]string
-			err := json.NewDecoder(req.Body).Decode(&m)
-			c.Assert(err, gocheck.IsNil)
-			return req.URL.Path == "/apps/death" &&
-				req.Method == "POST" &&
-				m["cname"] == ""
+			return req.URL.Path == "/apps/death/cname" && req.Method == "DELETE"
 		},
 	}
 	client := cmd.NewClient(&http.Client{Transport: trans}, nil, manager)
@@ -558,12 +617,7 @@ func (s *S) TestUnsetCNameWithoutTheFlag(c *gocheck.C) {
 		Transport: testing.Transport{Message: "Restarted", Status: http.StatusOK},
 		CondFunc: func(req *http.Request) bool {
 			called = true
-			var m map[string]string
-			err := json.NewDecoder(req.Body).Decode(&m)
-			c.Assert(err, gocheck.IsNil)
-			return req.URL.Path == "/apps/corey" &&
-				req.Method == "POST" &&
-				m["cname"] == ""
+			return req.URL.Path == "/apps/corey/cname" && req.Method == "DELETE"
 		},
 	}
 	client := cmd.NewClient(&http.Client{Transport: trans}, nil, manager)

@@ -9,12 +9,13 @@ import (
 	"errors"
 	"github.com/globocom/commandmocker"
 	"github.com/globocom/config"
+	etesting "github.com/globocom/tsuru/exec/testing"
 	"github.com/globocom/tsuru/provision"
 	"github.com/globocom/tsuru/repository"
 	"github.com/globocom/tsuru/testing"
 	"labix.org/v2/mgo/bson"
 	"launchpad.net/gocheck"
-	"reflect"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,23 +50,27 @@ func (s *S) TestUnitsCollection(c *gocheck.C) {
 }
 
 func (s *S) TestProvision(c *gocheck.C) {
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	config.Set("juju:charms-path", "/etc/juju/charms")
 	defer config.Unset("juju:charms-path")
 	config.Set("host", "somehost")
 	defer config.Unset("host")
-	tmpdir, err := commandmocker.Add("juju", "$*")
-	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(tmpdir)
 	app := testing.NewFakeApp("trace", "python", 0)
 	p := JujuProvisioner{}
-	err = p.Provision(app)
+	err := p.Provision(app)
 	c.Assert(err, gocheck.IsNil)
-	c.Assert(commandmocker.Ran(tmpdir), gocheck.Equals, true)
-	expectedParams := []string{
+	args := []string{
 		"deploy", "--repository", "/etc/juju/charms", "local:python", "trace",
-		"set", "trace", "app-repo=" + repository.GetReadOnlyUrl("trace"),
 	}
-	c.Assert(commandmocker.Parameters(tmpdir), gocheck.DeepEquals, expectedParams)
+	c.Assert(fexec.ExecutedCmd("juju", args), gocheck.Equals, true)
+	args = []string{
+		"set", "trace", "app-repo=" + repository.ReadOnlyURL("trace"),
+	}
+	c.Assert(fexec.ExecutedCmd("juju", args), gocheck.Equals, true)
 }
 
 func (s *S) TestProvisionUndefinedCharmsPath(c *gocheck.C) {
@@ -93,18 +98,19 @@ func (s *S) TestProvisionFailure(c *gocheck.C) {
 }
 
 func (s *S) TestRestart(c *gocheck.C) {
-	tmpdir, err := commandmocker.Add("juju", "restart")
-	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(tmpdir)
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	app := testing.NewFakeApp("cribcaged", "python", 1)
 	p := JujuProvisioner{}
-	err = p.Restart(app)
+	err := p.Restart(app)
 	c.Assert(err, gocheck.IsNil)
-	c.Assert(commandmocker.Ran(tmpdir), gocheck.Equals, true)
-	expected := []string{
+	args := []string{
 		"ssh", "-o", "StrictHostKeyChecking no", "-q", "1", "/var/lib/tsuru/hooks/restart",
 	}
-	c.Assert(commandmocker.Parameters(tmpdir), gocheck.DeepEquals, expected)
+	c.Assert(fexec.ExecutedCmd("juju", args), gocheck.Equals, true)
 }
 
 func (s *S) TestRestartFailure(c *gocheck.C) {
@@ -121,15 +127,34 @@ func (s *S) TestRestartFailure(c *gocheck.C) {
 	c.Assert(pErr.Err.Error(), gocheck.Equals, "exit status 25")
 }
 
-func (s *S) TestDestroy(c *gocheck.C) {
-	tmpdir, err := commandmocker.Add("juju", "$*")
+func (s *S) TestDeploy(c *gocheck.C) {
+	tmpdir, err := commandmocker.Add("juju", "")
 	c.Assert(err, gocheck.IsNil)
 	defer commandmocker.Remove(tmpdir)
+	config.Set("git:unit-repo", "test/dir")
+	defer func() {
+		config.Unset("git:unit-repo")
+	}()
+	app := testing.NewFakeApp("cribcaged", "python", 1)
+	w := &bytes.Buffer{}
+	p := JujuProvisioner{}
+	err = p.Deploy(app, "f83ac40", w)
+	c.Assert(err, gocheck.IsNil)
+	expected := []string{"set", app.GetName(), "app-version=f83ac40"}
+	c.Assert(commandmocker.Parameters(tmpdir)[:3], gocheck.DeepEquals, expected)
+}
+
+func (s *S) TestDestroy(c *gocheck.C) {
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	app := testing.NewFakeApp("cribcaged", "python", 3)
 	p := JujuProvisioner{}
 	conn, collection := p.unitsCollection()
 	defer conn.Close()
-	err = collection.Insert(
+	err := collection.Insert(
 		instance{UnitName: "cribcaged/0"},
 		instance{UnitName: "cribcaged/1"},
 		instance{UnitName: "cribcaged/2"},
@@ -137,22 +162,14 @@ func (s *S) TestDestroy(c *gocheck.C) {
 	c.Assert(err, gocheck.IsNil)
 	err = p.Destroy(app)
 	c.Assert(err, gocheck.IsNil)
-	c.Assert(commandmocker.Ran(tmpdir), gocheck.Equals, true)
-	expected := []string{
-		"destroy-service", "cribcaged",
-		"terminate-machine", "1",
-		"terminate-machine", "2",
-		"terminate-machine", "3",
-	}
-	ran := make(chan bool, 1)
-	go func() {
-		for {
-			if reflect.DeepEqual(commandmocker.Parameters(tmpdir), expected) {
-				ran <- true
-			}
-			time.Sleep(1e3)
-		}
-	}()
+	args := []string{"destroy-service", "cribcaged"}
+	c.Assert(fexec.ExecutedCmd("juju", args), gocheck.Equals, true)
+	args = []string{"terminate-machine", "1"}
+	c.Assert(fexec.ExecutedCmd("juju", args), gocheck.Equals, true)
+	args = []string{"terminate-machine", "2"}
+	c.Assert(fexec.ExecutedCmd("juju", args), gocheck.Equals, true)
+	args = []string{"terminate-machine", "3"}
+	c.Assert(fexec.ExecutedCmd("juju", args), gocheck.Equals, true)
 	n, err := collection.Find(bson.M{
 		"_id": bson.M{
 			"$in": []string{"cribcaged/0", "cribcaged/1", "cribcaged/2"},
@@ -160,12 +177,7 @@ func (s *S) TestDestroy(c *gocheck.C) {
 	}).Count()
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(n, gocheck.Equals, 0)
-	select {
-	case <-ran:
-	case <-time.After(2e9):
-		c.Errorf("Did not run terminate-machine commands after 2 seconds.")
-	}
-	c.Assert(commandmocker.Parameters(tmpdir), gocheck.DeepEquals, expected)
+	c.Assert(fexec.ExecutedCmd("juju", args), gocheck.Equals, true)
 }
 
 func (s *S) TestDestroyFailure(c *gocheck.C) {
@@ -197,11 +209,10 @@ func (s *S) TestAddUnits(c *gocheck.C) {
 	}
 	expected := []string{"resist/3", "resist/4", "resist/5", "resist/6"}
 	c.Assert(names, gocheck.DeepEquals, expected)
-	c.Assert(commandmocker.Ran(tmpdir), gocheck.Equals, true)
-	expectedParams := []string{
+	args := []string{
 		"add-unit", "resist", "--num-units", "4",
 	}
-	c.Assert(commandmocker.Parameters(tmpdir), gocheck.DeepEquals, expectedParams)
+	c.Assert(commandmocker.Parameters(tmpdir), gocheck.DeepEquals, args)
 	_, err = getQueue(queueName).Get(1e6)
 	c.Assert(err, gocheck.NotNil)
 }
@@ -230,36 +241,38 @@ func (s *S) TestAddUnitsFailure(c *gocheck.C) {
 }
 
 func (s *S) TestRemoveUnit(c *gocheck.C) {
-	tmpdir, err := commandmocker.Add("juju", "removed")
-	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(tmpdir)
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	app := testing.NewFakeApp("two", "rush", 3)
 	p := JujuProvisioner{}
 	conn, collection := p.unitsCollection()
 	defer conn.Close()
-	err = collection.Insert(instance{UnitName: "two/2", InstanceId: "i-00000439"})
+	err := collection.Insert(instance{UnitName: "two/2", InstanceID: "i-00000439"})
 	c.Assert(err, gocheck.IsNil)
 	err = p.RemoveUnit(app, "two/2")
 	c.Assert(err, gocheck.IsNil)
-	c.Assert(commandmocker.Ran(tmpdir), gocheck.Equals, true)
-	expected := []string{"remove-unit", "two/2", "terminate-machine", "3"}
 	ran := make(chan bool, 1)
 	go func() {
 		for {
-			if reflect.DeepEqual(commandmocker.Parameters(tmpdir), expected) {
+			args1 := []string{"remove-unit", "two/2"}
+			args2 := []string{"terminate-machine", "3"}
+			if fexec.ExecutedCmd("juju", args1) && fexec.ExecutedCmd("juju", args2) {
 				ran <- true
 			}
-			time.Sleep(1e3)
+			runtime.Gosched()
 		}
 	}()
-	n, err := collection.Find(bson.M{"_id": "two/2"}).Count()
-	c.Assert(err, gocheck.IsNil)
-	c.Assert(n, gocheck.Equals, 0)
 	select {
 	case <-ran:
 	case <-time.After(2e9):
 		c.Errorf("Did not run terminate-machine command after 2 seconds.")
 	}
+	n, err := collection.Find(bson.M{"_id": "two/2"}).Count()
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(n, gocheck.Equals, 0)
 }
 
 func (s *S) TestRemoveUnitUnknownByJuju(c *gocheck.C) {
@@ -298,30 +311,59 @@ func (s *S) TestRemoveUnitFailure(c *gocheck.C) {
 	c.Assert(e.Err.Error(), gocheck.Equals, "exit status 66")
 }
 
-func (s *S) TestExecuteCommand(c *gocheck.C) {
-	var buf bytes.Buffer
-	tmpdir, err := commandmocker.Add("juju", "$*")
+func (s *S) TestInstallDepsRunRelatedHook(c *gocheck.C) {
+	p := &JujuProvisioner{}
+	app := testing.NewFakeApp("myapp", "python", 0)
+	w := &bytes.Buffer{}
+	err := p.InstallDeps(app, w)
 	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(tmpdir)
+	expected := []string{"ran /var/lib/tsuru/hooks/dependencies"}
+	c.Assert(app.Commands, gocheck.DeepEquals, expected)
+}
+
+func (s *S) TestExecutedCmd(c *gocheck.C) {
+	var buf bytes.Buffer
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	app := testing.NewFakeApp("almah", "static", 2)
 	p := JujuProvisioner{}
-	err = p.ExecuteCommand(&buf, &buf, app, "ls", "-lh")
+	err := p.ExecuteCommand(&buf, &buf, app, "ls", "-lh")
 	c.Assert(err, gocheck.IsNil)
 	bufOutput := `Output from unit "almah/0":
 
-ssh -o StrictHostKeyChecking no -q 1 ls -lh
+
 
 Output from unit "almah/1":
 
-ssh -o StrictHostKeyChecking no -q 2 ls -lh
+
 `
-	cmdOutput := "ssh -o StrictHostKeyChecking no -q 1 ls -lhssh -o StrictHostKeyChecking no -q 2 ls -lh"
-	c.Assert(commandmocker.Ran(tmpdir), gocheck.Equals, true)
-	c.Assert(commandmocker.Output(tmpdir), gocheck.Equals, cmdOutput)
+	args := []string{
+		"ssh",
+		"-o",
+		"StrictHostKeyChecking no",
+		"-q",
+		"1",
+		"ls",
+		"-lh",
+	}
+	c.Assert(fexec.ExecutedCmd("juju", args), gocheck.Equals, true)
+	args = []string{
+		"ssh",
+		"-o",
+		"StrictHostKeyChecking no",
+		"-q",
+		"2",
+		"ls",
+		"-lh",
+	}
+	c.Assert(fexec.ExecutedCmd("juju", args), gocheck.Equals, true)
 	c.Assert(buf.String(), gocheck.Equals, bufOutput)
 }
 
-func (s *S) TestExecuteCommandFailure(c *gocheck.C) {
+func (s *S) TestExecutedCmdFailure(c *gocheck.C) {
 	var buf bytes.Buffer
 	tmpdir, err := commandmocker.Error("juju", "failed", 2)
 	c.Assert(err, gocheck.IsNil)
@@ -334,47 +376,69 @@ func (s *S) TestExecuteCommandFailure(c *gocheck.C) {
 	c.Assert(buf.String(), gocheck.Equals, "failed\n")
 }
 
-func (s *S) TestExecuteCommandOneUnit(c *gocheck.C) {
+func (s *S) TestExecutedCmdOneUnit(c *gocheck.C) {
 	var buf bytes.Buffer
-	tmpdir, err := commandmocker.Add("juju", "$*")
-	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(tmpdir)
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	app := testing.NewFakeApp("almah", "static", 1)
 	p := JujuProvisioner{}
-	err = p.ExecuteCommand(&buf, &buf, app, "ls", "-lh")
+	err := p.ExecuteCommand(&buf, &buf, app, "ls", "-lh")
 	c.Assert(err, gocheck.IsNil)
-	output := "ssh -o StrictHostKeyChecking no -q 1 ls -lh"
-	c.Assert(commandmocker.Ran(tmpdir), gocheck.Equals, true)
-	c.Assert(commandmocker.Output(tmpdir), gocheck.Equals, output)
-	c.Assert(buf.String(), gocheck.Equals, output+"\n")
+	args := []string{
+		"ssh",
+		"-o",
+		"StrictHostKeyChecking no",
+		"-q",
+		"1",
+		"ls",
+		"-lh",
+	}
+	c.Assert(fexec.ExecutedCmd("juju", args), gocheck.Equals, true)
 }
 
-func (s *S) TestExecuteCommandUnitDown(c *gocheck.C) {
+func (s *S) TestExecutedCmdUnitDown(c *gocheck.C) {
 	var buf bytes.Buffer
-	tmpdir, err := commandmocker.Add("juju", "$*")
-	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(tmpdir)
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	app := testing.NewFakeApp("almah", "static", 3)
 	app.SetUnitStatus(provision.StatusDown, 1)
 	p := JujuProvisioner{}
-	err = p.ExecuteCommand(&buf, &buf, app, "ls", "-lha")
+	err := p.ExecuteCommand(&buf, &buf, app, "ls", "-lha")
 	c.Assert(err, gocheck.IsNil)
-	cmdOutput := "ssh -o StrictHostKeyChecking no -q 1 ls -lha"
-	cmdOutput += "ssh -o StrictHostKeyChecking no -q 3 ls -lha"
+	args := []string{
+		"ssh",
+		"-o",
+		"StrictHostKeyChecking no",
+		"-q",
+		"1",
+		"ls",
+		"-lha",
+	}
+	c.Assert(fexec.ExecutedCmd("juju", args), gocheck.Equals, true)
+	args = []string{
+		"ssh",
+		"-o",
+		"StrictHostKeyChecking no",
+		"-q",
+		"3",
+		"ls",
+		"-lha",
+	}
+	c.Assert(fexec.ExecutedCmd("juju", args), gocheck.Equals, true)
 	bufOutput := `Output from unit "almah/0":
 
-ssh -o StrictHostKeyChecking no -q 1 ls -lha
 
-Output from unit "almah/1":
-
-Unit state is "down", it must be "started" for running commands.
 
 Output from unit "almah/2":
 
-ssh -o StrictHostKeyChecking no -q 3 ls -lha
+
 `
-	c.Assert(commandmocker.Ran(tmpdir), gocheck.Equals, true)
-	c.Assert(commandmocker.Output(tmpdir), gocheck.Equals, cmdOutput)
 	c.Assert(buf.String(), gocheck.Equals, bufOutput)
 }
 
@@ -382,8 +446,8 @@ func (s *S) TestSaveBootstrapMachine(c *gocheck.C) {
 	p := JujuProvisioner{}
 	m := machine{
 		AgentState:    "state",
-		IpAddress:     "ip",
-		InstanceId:    "id",
+		IPAddress:     "ip",
+		InstanceID:    "id",
 		InstanceState: "state",
 	}
 	p.saveBootstrapMachine(m)
@@ -418,7 +482,7 @@ func (s *S) TestCollectStatus(c *gocheck.C) {
 	p := JujuProvisioner{}
 	conn, collection := p.unitsCollection()
 	defer conn.Close()
-	err = collection.Insert(instance{UnitName: "as_i_rise/0", InstanceId: "i-00000439"})
+	err = collection.Insert(instance{UnitName: "as_i_rise/0", InstanceID: "i-00000439"})
 	c.Assert(err, gocheck.IsNil)
 	defer collection.Remove(bson.M{"_id": bson.M{"$in": []string{"as_i_rise/0", "the_infanta/0"}}})
 	expected := []provision.Unit{
@@ -471,9 +535,9 @@ func (s *S) TestCollectStatus(c *gocheck.C) {
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(instances, gocheck.HasLen, 2)
 	c.Assert(instances[0].UnitName, gocheck.Equals, "as_i_rise/0")
-	c.Assert(instances[0].InstanceId, gocheck.Equals, "i-00000439")
+	c.Assert(instances[0].InstanceID, gocheck.Equals, "i-00000439")
 	c.Assert(instances[1].UnitName, gocheck.Equals, "the_infanta/0")
-	c.Assert(instances[1].InstanceId, gocheck.Equals, "i-0000043e")
+	c.Assert(instances[1].InstanceID, gocheck.Equals, "i-0000043e")
 	var b machine
 	err = collection.Find(nil).One(&b)
 	c.Assert(err, gocheck.IsNil)
@@ -523,7 +587,7 @@ func (s *S) TestCollectStatusDirtyOutput(c *gocheck.C) {
 			if n, _ := collection.Find(q).Count(); n == 2 {
 				break
 			}
-			time.Sleep(1e3)
+			runtime.Gosched()
 		}
 		collection.Remove(q)
 		wg.Done()
@@ -538,7 +602,7 @@ func (s *S) TestCollectStatusIDChangeDisabledELB(c *gocheck.C) {
 	p := JujuProvisioner{}
 	conn, collection := p.unitsCollection()
 	defer conn.Close()
-	err = collection.Insert(instance{UnitName: "as_i_rise/0", InstanceId: "i-00000239"})
+	err = collection.Insert(instance{UnitName: "as_i_rise/0", InstanceID: "i-00000239"})
 	c.Assert(err, gocheck.IsNil)
 	defer collection.Remove(bson.M{"_id": bson.M{"$in": []string{"as_i_rise/0", "the_infanta/0"}}})
 	_, err = p.CollectStatus()
@@ -553,7 +617,7 @@ func (s *S) TestCollectStatusIDChangeDisabledELB(c *gocheck.C) {
 				done <- 1
 				return
 			}
-			time.Sleep(1e3)
+			runtime.Gosched()
 		}
 	}()
 	select {
@@ -570,7 +634,7 @@ func (s *S) TestCollectStatusIDChangeFromPending(c *gocheck.C) {
 	p := JujuProvisioner{}
 	conn, collection := p.unitsCollection()
 	defer conn.Close()
-	err = collection.Insert(instance{UnitName: "as_i_rise/0", InstanceId: "pending"})
+	err = collection.Insert(instance{UnitName: "as_i_rise/0", InstanceID: "pending"})
 	c.Assert(err, gocheck.IsNil)
 	defer collection.Remove(bson.M{"_id": bson.M{"$in": []string{"as_i_rise/0", "the_infanta/0"}}})
 	_, err = p.CollectStatus()
@@ -585,7 +649,7 @@ func (s *S) TestCollectStatusIDChangeFromPending(c *gocheck.C) {
 				done <- 1
 				return
 			}
-			time.Sleep(1e3)
+			runtime.Gosched()
 		}
 	}()
 	select {
@@ -622,21 +686,6 @@ func (s *S) TestCollectStatusInvalidYAML(c *gocheck.C) {
 	c.Assert(pErr.Err, gocheck.ErrorMatches, `^YAML error:.*$`)
 }
 
-func (s *S) TestLoadBalancerEnabledElb(c *gocheck.C) {
-	p := JujuProvisioner{}
-	p.elb = new(bool)
-	*p.elb = true
-	lb := p.LoadBalancer()
-	c.Assert(lb, gocheck.NotNil)
-}
-
-func (s *S) TestLoadBalancerDisabledElb(c *gocheck.C) {
-	p := JujuProvisioner{}
-	p.elb = new(bool)
-	lb := p.LoadBalancer()
-	c.Assert(lb, gocheck.IsNil)
-}
-
 func (s *S) TestExecWithTimeout(c *gocheck.C) {
 	var data = []struct {
 		cmd     []string
@@ -651,13 +700,13 @@ func (s *S) TestExecWithTimeout(c *gocheck.C) {
 			err:     errors.New(`"sleep 2" ran for more than 1ms.`),
 		},
 		{
-			cmd:     []string{"python", "-c", "import time; time.sleep(1); print 'hello world!'"},
+			cmd:     []string{"python", "-c", "import time; time.sleep(1); print('hello world!')"},
 			timeout: 5e9,
 			out:     "hello world!\n",
 			err:     nil,
 		},
 		{
-			cmd:     []string{"python", "-c", "import sys; print 'hello world!'; exit(1)"},
+			cmd:     []string{"python", "-c", "import sys; print('hello world!'); exit(1)"},
 			timeout: 5e9,
 			out:     "hello world!\n",
 			err:     errors.New("exit status 1"),
@@ -709,7 +758,7 @@ func (s *S) TestAddr(c *gocheck.C) {
 	p := JujuProvisioner{}
 	addr, err := p.Addr(app)
 	c.Assert(err, gocheck.IsNil)
-	c.Assert(addr, gocheck.Equals, app.ProvisionUnits()[0].GetIp())
+	c.Assert(addr, gocheck.Equals, app.ProvisionedUnits()[0].GetIp())
 }
 
 func (s *S) TestAddrWithoutUnits(c *gocheck.C) {
@@ -722,18 +771,21 @@ func (s *S) TestAddrWithoutUnits(c *gocheck.C) {
 }
 
 func (s *ELBSuite) TestProvisionWithELB(c *gocheck.C) {
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	config.Set("juju:charms-path", "/home/charms")
 	defer config.Unset("juju:charms-path")
-	tmpdir, err := commandmocker.Add("juju", "deployed")
-	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(tmpdir)
 	app := testing.NewFakeApp("jimmy", "who", 0)
 	p := JujuProvisioner{}
-	err = p.Provision(app)
+	err := p.Provision(app)
 	c.Assert(err, gocheck.IsNil)
-	lb := p.LoadBalancer()
-	defer lb.Destroy(app)
-	addr, err := lb.Addr(app)
+	router, err := Router()
+	c.Assert(err, gocheck.IsNil)
+	defer router.RemoveBackend(app.GetName())
+	addr, err := router.Addr(app.GetName())
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(addr, gocheck.Not(gocheck.Equals), "")
 	msg, err := getQueue(queueName).Get(1e9)
@@ -746,21 +798,24 @@ func (s *ELBSuite) TestProvisionWithELB(c *gocheck.C) {
 func (s *ELBSuite) TestDestroyWithELB(c *gocheck.C) {
 	config.Set("juju:charms-path", "/home/charms")
 	defer config.Unset("juju:charms-path")
-	tmpdir, err := commandmocker.Add("juju", "deployed")
-	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(tmpdir)
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	app := testing.NewFakeApp("jimmy", "who", 0)
 	p := JujuProvisioner{}
-	err = p.Provision(app)
+	err := p.Provision(app)
 	c.Assert(err, gocheck.IsNil)
 	err = p.Destroy(app)
 	c.Assert(err, gocheck.IsNil)
-	lb := p.LoadBalancer()
-	defer lb.Destroy(app) // sanity
-	addr, err := lb.Addr(app)
+	router, err := Router()
+	c.Assert(err, gocheck.IsNil)
+	defer router.RemoveBackend(app.GetName())
+	addr, err := router.Addr(app.GetName())
 	c.Assert(addr, gocheck.Equals, "")
 	c.Assert(err, gocheck.NotNil)
-	c.Assert(err.Error(), gocheck.Equals, "not found")
+	c.Assert(err, gocheck.ErrorMatches, "not found")
 	q := getQueue(queueName)
 	msg, err := q.Get(1e9)
 	c.Assert(err, gocheck.IsNil)
@@ -802,17 +857,25 @@ func (s *ELBSuite) TestRemoveUnitWithELB(c *gocheck.C) {
 			InstanceId: id,
 		}
 	}
-	tmpdir, err := commandmocker.Add("juju", "unit removed")
-	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(tmpdir)
+	fexec := &etesting.FakeExecutor{}
+	execMut.Lock()
+	execut = fexec
+	execMut.Unlock()
+	defer func() {
+		execMut.Lock()
+		defer execMut.Unlock()
+		execut = nil
+	}()
 	app := testing.NewFakeApp("radio", "rush", 4)
-	manager := ELBManager{}
-	manager.e = s.client
-	err = manager.Create(app)
+	router, err := Router()
 	c.Assert(err, gocheck.IsNil)
-	defer manager.Destroy(app)
-	err = manager.Register(app, units...)
+	err = router.AddBackend(app.GetName())
 	c.Assert(err, gocheck.IsNil)
+	defer router.RemoveBackend(app.GetName())
+	for _, unit := range units {
+		err = router.AddRoute(app.GetName(), unit.InstanceId)
+		c.Assert(err, gocheck.IsNil)
+	}
 	p := JujuProvisioner{}
 	fUnit := testing.FakeUnit{Name: units[0].Name, InstanceId: units[0].InstanceId}
 	err = p.removeUnit(app, &fUnit)
@@ -828,10 +891,11 @@ func (s *ELBSuite) TestRemoveUnitWithELB(c *gocheck.C) {
 func (s *ELBSuite) TestCollectStatusWithELBAndIDChange(c *gocheck.C) {
 	a := testing.NewFakeApp("symfonia", "symfonia", 0)
 	p := JujuProvisioner{}
-	lb := p.LoadBalancer()
-	err := lb.Create(a)
+	router, err := Router()
 	c.Assert(err, gocheck.IsNil)
-	defer lb.Destroy(a)
+	err = router.AddBackend(a.GetName())
+	c.Assert(err, gocheck.IsNil)
+	defer router.RemoveBackend(a.GetName())
 	id1 := s.server.NewInstance()
 	defer s.server.RemoveInstance(id1)
 	id2 := s.server.NewInstance()
@@ -840,9 +904,12 @@ func (s *ELBSuite) TestCollectStatusWithELBAndIDChange(c *gocheck.C) {
 	defer s.server.RemoveInstance(id3)
 	conn, collection := p.unitsCollection()
 	defer conn.Close()
-	err = collection.Insert(instance{UnitName: "symfonia/0", InstanceId: id3})
+	err = collection.Insert(instance{UnitName: "symfonia/0", InstanceID: id3})
 	c.Assert(err, gocheck.IsNil)
-	err = lb.Register(a, provision.Unit{InstanceId: id3}, provision.Unit{InstanceId: id2})
+	err = router.AddRoute(a.GetName(), id3)
+	c.Assert(err, gocheck.IsNil)
+	err = router.AddRoute(a.GetName(), id2)
+	c.Assert(err, gocheck.IsNil)
 	q := bson.M{"_id": bson.M{"$in": []string{"symfonia/0", "symfonia/1", "symfonia/2", "raise/0"}}}
 	defer collection.Remove(q)
 	output := strings.Replace(simpleCollectOutput, "i-00004444", id1, 1)
@@ -862,7 +929,7 @@ func (s *ELBSuite) TestCollectStatusWithELBAndIDChange(c *gocheck.C) {
 				done <- 1
 				return
 			}
-			time.Sleep(1e3)
+			runtime.Gosched()
 		}
 	}()
 	select {
@@ -882,22 +949,90 @@ func (s *ELBSuite) TestCollectStatusWithELBAndIDChange(c *gocheck.C) {
 func (s *ELBSuite) TestAddrWithELB(c *gocheck.C) {
 	app := testing.NewFakeApp("jimmy", "who", 0)
 	p := JujuProvisioner{}
-	lb := p.LoadBalancer()
-	err := lb.Create(app)
+	router, err := Router()
 	c.Assert(err, gocheck.IsNil)
-	defer lb.Destroy(app)
+	router.AddBackend(app.GetName())
+	defer router.RemoveBackend(app.GetName())
 	addr, err := p.Addr(app)
 	c.Assert(err, gocheck.IsNil)
-	lAddr, err := lb.Addr(app)
+	elbAddr, err := router.Addr(app.GetName())
 	c.Assert(err, gocheck.IsNil)
-	c.Assert(addr, gocheck.Equals, lAddr)
+	c.Assert(addr, gocheck.Equals, elbAddr)
 }
 
 func (s *ELBSuite) TestAddrWithUnknownELB(c *gocheck.C) {
-	app := testing.NewFakeApp("jimmy", "who", 0)
+	app := testing.NewFakeApp("jimmi", "who", 0)
 	p := JujuProvisioner{}
 	addr, err := p.Addr(app)
 	c.Assert(addr, gocheck.Equals, "")
 	c.Assert(err, gocheck.NotNil)
-	c.Assert(err.Error(), gocheck.Equals, "not found")
+	c.Assert(err, gocheck.ErrorMatches, "^There is no ACTIVE Load Balancer named.*")
+}
+
+func (s *ELBSuite) TestSwap(c *gocheck.C) {
+	var p JujuProvisioner
+	app1 := testing.NewFakeApp("app1", "python", 1)
+	app2 := testing.NewFakeApp("app2", "python", 1)
+	id1 := s.server.NewInstance()
+	defer s.server.RemoveInstance(id1)
+	id2 := s.server.NewInstance()
+	defer s.server.RemoveInstance(id2)
+	router, err := Router()
+	c.Assert(err, gocheck.IsNil)
+	err = router.AddBackend(app1.GetName())
+	c.Assert(err, gocheck.IsNil)
+	defer router.RemoveBackend(app1.GetName())
+	err = router.AddRoute(app1.GetName(), id1)
+	c.Assert(err, gocheck.IsNil)
+	err = router.AddBackend(app2.GetName())
+	c.Assert(err, gocheck.IsNil)
+	defer router.RemoveBackend(app2.GetName())
+	err = router.AddRoute(app2.GetName(), id2)
+	c.Assert(err, gocheck.IsNil)
+	err = p.Swap(app1, app2)
+	c.Assert(err, gocheck.IsNil)
+	app2Routes, err := router.Routes(app2.GetName())
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(app2Routes, gocheck.DeepEquals, []string{id2})
+	app1Routes, err := router.Routes(app1.GetName())
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(app1Routes, gocheck.DeepEquals, []string{id1})
+	addr, err := router.Addr(app1.GetName())
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(addr, gocheck.Equals, "app2-some-aws-stuff.us-east-1.elb.amazonaws.com")
+	addr, err = router.Addr(app2.GetName())
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(addr, gocheck.Equals, "app1-some-aws-stuff.us-east-1.elb.amazonaws.com")
+}
+
+func (s *S) TestExecutedCommandOnce(c *gocheck.C) {
+	var buf bytes.Buffer
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
+	app := testing.NewFakeApp("almah", "static", 2)
+	p := JujuProvisioner{}
+	err := p.ExecuteCommandOnce(&buf, &buf, app, "ls", "-lh")
+	c.Assert(err, gocheck.IsNil)
+	args := []string{
+		"ssh",
+		"-o",
+		"StrictHostKeyChecking no",
+		"-q",
+		"1",
+		"ls",
+		"-lh",
+	}
+	c.Assert(fexec.ExecutedCmd("juju", args), gocheck.Equals, true)
+	c.Assert(buf.String(), gocheck.Equals, "\n")
+}
+
+func (s *S) TestStartedUnits(c *gocheck.C) {
+	app := testing.NewFakeApp("almah", "static", 2)
+	app.SetUnitStatus(provision.StatusDown, 1)
+	p := JujuProvisioner{}
+	units := p.startedUnits(app)
+	c.Assert(units, gocheck.HasLen, 1)
 }

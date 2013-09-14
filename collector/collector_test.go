@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package collector
 
 import (
 	"github.com/globocom/tsuru/app"
@@ -78,6 +78,7 @@ func (s *S) TestUpdateWithMultipleUnits(c *gocheck.C) {
 	c.Assert(unit.State, gocheck.Equals, provision.StatusStarted.String())
 	addr, _ := s.provisioner.Addr(a)
 	c.Assert(a.Ip, gocheck.Equals, addr)
+	c.Assert(a.State, gocheck.Equals, "ready")
 }
 
 func (s *S) TestUpdateWithDownMachine(c *gocheck.C) {

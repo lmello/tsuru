@@ -68,7 +68,7 @@ func (c *KeyRemove) Info() *cmd.Info {
 	}
 }
 
-func (c *KeyRemove) Run(context *cmd.Context, client cmd.Doer) error {
+func (c *KeyRemove) Run(context *cmd.Context, client *cmd.Client) error {
 	keyPath, err := getKeyPath(context.Args)
 	if err != nil {
 		return err
@@ -78,7 +78,7 @@ func (c *KeyRemove) Run(context *cmd.Context, client cmd.Doer) error {
 		return c.fileNotFound(context)
 	}
 	b := bytes.NewBufferString(fmt.Sprintf(`{"key":"%s"}`, strings.Replace(key, "\n", "", -1)))
-	url, err := cmd.GetUrl("/users/keys")
+	url, err := cmd.GetURL("/users/keys")
 	if err != nil {
 		return err
 	}
@@ -90,7 +90,7 @@ func (c *KeyRemove) Run(context *cmd.Context, client cmd.Doer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprint(context.Stdout, "Key successfully removed!\n")
+	fmt.Fprintf(context.Stdout, "Key %q successfully removed!\n", keyPath)
 	return nil
 }
 
@@ -106,7 +106,7 @@ func (c *KeyAdd) Info() *cmd.Info {
 	}
 }
 
-func (c *KeyAdd) Run(context *cmd.Context, client cmd.Doer) error {
+func (c *KeyAdd) Run(context *cmd.Context, client *cmd.Client) error {
 	keyPath, err := getKeyPath(context.Args)
 	if err != nil {
 		return err
@@ -116,7 +116,7 @@ func (c *KeyAdd) Run(context *cmd.Context, client cmd.Doer) error {
 		return c.fileNotFound(context)
 	}
 	b := bytes.NewBufferString(fmt.Sprintf(`{"key":"%s"}`, strings.Replace(key, "\n", "", -1)))
-	url, err := cmd.GetUrl("/users/keys")
+	url, err := cmd.GetURL("/users/keys")
 	if err != nil {
 		return err
 	}
@@ -128,6 +128,6 @@ func (c *KeyAdd) Run(context *cmd.Context, client cmd.Doer) error {
 	if err != nil {
 		return err
 	}
-	fmt.Fprint(context.Stdout, "Key successfully added!\n")
+	fmt.Fprintf(context.Stdout, "Key %q successfully added!\n", keyPath)
 	return nil
 }

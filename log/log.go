@@ -10,9 +10,40 @@
 package log
 
 import (
+	"github.com/globocom/config"
+	"io"
 	"log"
+	"log/syslog"
+	"os"
 	"sync"
 )
+
+func getSysLogger() *log.Logger {
+	logger, err := syslog.NewLogger(syslog.LOG_INFO, log.LstdFlags)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return logger
+}
+
+func getFileLogger(fileName string) *log.Logger {
+	file, err := os.OpenFile(fileName, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	if err != nil {
+		log.Fatal(err)
+	}
+	return log.New(file, "", log.LstdFlags)
+}
+
+func Init() {
+	logFileName, err := config.GetString("log:file")
+	var logger *log.Logger
+	if err != nil {
+		logger = getSysLogger()
+	} else {
+		logger = getFileLogger(logFileName)
+	}
+	SetLogger(logger)
+}
 
 // Target is the current target for the log package.
 type Target struct {
@@ -84,7 +115,7 @@ func (t *Target) Panicf(format string, v ...interface{}) {
 	}
 }
 
-var DefaultTarget *Target = new(Target)
+var DefaultTarget = new(Target)
 
 // Fatal is a wrapper for DefaultTarget.Fatal.
 func Fatal(v ...interface{}) {
@@ -119,4 +150,15 @@ func Panicf(format string, v ...interface{}) {
 // SetLogger is a wrapper for DefaultTarget.SetLogger.
 func SetLogger(logger *log.Logger) {
 	DefaultTarget.SetLogger(logger)
+}
+
+func Write(w io.Writer, content []byte) error {
+	n, err := w.Write(content)
+	if err != nil {
+		return err
+	}
+	if n != len(content) {
+		return io.ErrShortWrite
+	}
+	return nil
 }

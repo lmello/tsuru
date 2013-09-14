@@ -12,8 +12,10 @@ import (
 	"github.com/globocom/tsuru/cmd/term"
 	"io"
 	"io/ioutil"
+	"launchpad.net/gnuflag"
 	"net/http"
 	"os"
+	"sort"
 )
 
 type userCreate struct{}
@@ -27,8 +29,8 @@ func (c *userCreate) Info() *Info {
 	}
 }
 
-func (c *userCreate) Run(context *Context, client Doer) error {
-	url, err := GetUrl("/users")
+func (c *userCreate) Run(context *Context, client *Client) error {
+	url, err := GetURL("/users")
 	if err != nil {
 		return err
 	}
@@ -52,7 +54,13 @@ func (c *userCreate) Run(context *Context, client Doer) error {
 	if err != nil {
 		return err
 	}
-	_, err = client.Do(request)
+	resp, err := client.Do(request)
+	if resp != nil {
+		if resp.StatusCode == http.StatusNotFound ||
+			resp.StatusCode == http.StatusMethodNotAllowed {
+			return errors.New("User creation is disabled.")
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -62,7 +70,7 @@ func (c *userCreate) Run(context *Context, client Doer) error {
 
 type userRemove struct{}
 
-func (c *userRemove) Run(context *Context, client Doer) error {
+func (c *userRemove) Run(context *Context, client *Client) error {
 	var answer string
 	fmt.Fprint(context.Stdout, `Are you sure you want to remove your user from tsuru? (y/n) `)
 	fmt.Fscanf(context.Stdin, "%s", &answer)
@@ -70,7 +78,7 @@ func (c *userRemove) Run(context *Context, client Doer) error {
 		fmt.Fprintln(context.Stdout, "Abort.")
 		return nil
 	}
-	url, err := GetUrl("/users")
+	url, err := GetURL("/users")
 	if err != nil {
 		return err
 	}
@@ -98,9 +106,9 @@ func (c *userRemove) Info() *Info {
 
 type login struct{}
 
-func (c *login) Run(context *Context, client Doer) error {
+func (c *login) Run(context *Context, client *Client) error {
 	email := context.Args[0]
-	url, err := GetUrl("/users/" + email + "/tokens")
+	url, err := GetURL("/users/" + email + "/tokens")
 	if err != nil {
 		return err
 	}
@@ -152,7 +160,11 @@ func (c *logout) Info() *Info {
 	}
 }
 
-func (c *logout) Run(context *Context, client Doer) error {
+func (c *logout) Run(context *Context, client *Client) error {
+	if url, err := GetURL("/users/tokens"); err == nil {
+		request, _ := http.NewRequest("DELETE", url, nil)
+		client.Do(request)
+	}
 	err := filesystem().Remove(joinWithUserDir(".tsuru_token"))
 	if err != nil && os.IsNotExist(err) {
 		return errors.New("You're not logged in!")
@@ -172,10 +184,10 @@ func (c *teamCreate) Info() *Info {
 	}
 }
 
-func (c *teamCreate) Run(context *Context, client Doer) error {
+func (c *teamCreate) Run(context *Context, client *Client) error {
 	team := context.Args[0]
 	b := bytes.NewBufferString(fmt.Sprintf(`{"name":"%s"}`, team))
-	url, err := GetUrl("/teams")
+	url, err := GetURL("/teams")
 	if err != nil {
 		return err
 	}
@@ -193,7 +205,7 @@ func (c *teamCreate) Run(context *Context, client Doer) error {
 
 type teamRemove struct{}
 
-func (c *teamRemove) Run(context *Context, client Doer) error {
+func (c *teamRemove) Run(context *Context, client *Client) error {
 	team := context.Args[0]
 	var answer string
 	fmt.Fprintf(context.Stdout, `Are you sure you want to remove team "%s"? (y/n) `, team)
@@ -202,7 +214,7 @@ func (c *teamRemove) Run(context *Context, client Doer) error {
 		fmt.Fprintln(context.Stdout, "Abort.")
 		return nil
 	}
-	url, err := GetUrl(fmt.Sprintf("/teams/%s", team))
+	url, err := GetURL(fmt.Sprintf("/teams/%s", team))
 	if err != nil {
 		return err
 	}
@@ -238,9 +250,9 @@ func (c *teamUserAdd) Info() *Info {
 	}
 }
 
-func (c *teamUserAdd) Run(context *Context, client Doer) error {
+func (c *teamUserAdd) Run(context *Context, client *Client) error {
 	teamName, userName := context.Args[0], context.Args[1]
-	url, err := GetUrl(fmt.Sprintf("/teams/%s/%s", teamName, userName))
+	url, err := GetURL(fmt.Sprintf("/teams/%s/%s", teamName, userName))
 	if err != nil {
 		return err
 	}
@@ -267,9 +279,9 @@ func (c *teamUserRemove) Info() *Info {
 	}
 }
 
-func (c *teamUserRemove) Run(context *Context, client Doer) error {
+func (c *teamUserRemove) Run(context *Context, client *Client) error {
 	teamName, userName := context.Args[0], context.Args[1]
-	url, err := GetUrl(fmt.Sprintf("/teams/%s/%s", teamName, userName))
+	url, err := GetURL(fmt.Sprintf("/teams/%s/%s", teamName, userName))
 	if err != nil {
 		return err
 	}
@@ -285,6 +297,44 @@ func (c *teamUserRemove) Run(context *Context, client Doer) error {
 	return nil
 }
 
+type teamUserList struct{}
+
+func (teamUserList) Run(context *Context, client *Client) error {
+	teamName := context.Args[0]
+	url, err := GetURL("/teams/" + teamName)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	var t struct{ Users []string }
+	err = json.NewDecoder(resp.Body).Decode(&t)
+	if err != nil {
+		return err
+	}
+	sort.Strings(t.Users)
+	for _, user := range t.Users {
+		fmt.Fprintf(context.Stdout, "- %s\n", user)
+	}
+	return nil
+}
+
+func (teamUserList) Info() *Info {
+	return &Info{
+		Name:    "team-user-list",
+		Usage:   "team-user-list",
+		Desc:    "List members of a team.",
+		MinArgs: 1,
+	}
+}
+
 type teamList struct{}
 
 func (c *teamList) Info() *Info {
@@ -296,8 +346,8 @@ func (c *teamList) Info() *Info {
 	}
 }
 
-func (c *teamList) Run(context *Context, client Doer) error {
-	url, err := GetUrl("/teams")
+func (c *teamList) Run(context *Context, client *Client) error {
+	url, err := GetURL("/teams")
 	if err != nil {
 		return err
 	}
@@ -330,8 +380,8 @@ func (c *teamList) Run(context *Context, client Doer) error {
 
 type changePassword struct{}
 
-func (c *changePassword) Run(context *Context, client Doer) error {
-	url, err := GetUrl("/users/password")
+func (c *changePassword) Run(context *Context, client *Client) error {
+	url, err := GetURL("/users/password")
 	if err != nil {
 		return err
 	}
@@ -381,6 +431,66 @@ func (c *changePassword) Info() *Info {
 		Usage: "change-password",
 		Desc:  "Change your password.",
 	}
+}
+
+type resetPassword struct {
+	token string
+}
+
+func (c *resetPassword) Info() *Info {
+	return &Info{
+		Name:  "reset-password",
+		Usage: "reset-password <email> [--token|-t <token>]",
+		Desc: `Redefines the user password.
+
+This process is composed by two steps:
+
+1. Generate a new token
+2. Reset the password using the token
+
+In order to generate the token, users should run this command without the --token flag.
+The token will be mailed to the user.
+
+With the token in hand, the user can finally reset the password using the --token flag.
+The new password will also be mailed to the user.`,
+		MinArgs: 1,
+	}
+}
+
+func (c *resetPassword) msg() string {
+	if c.token == "" {
+		return `You've successfully started the password reset process.
+
+Please check your email.`
+	}
+	return `Your password has been redefined and mailed to you.
+
+Please check your email.`
+}
+
+func (c *resetPassword) Run(context *Context, client *Client) error {
+	url := fmt.Sprintf("/users/%s/password", context.Args[0])
+	if c.token != "" {
+		url += "?token=" + c.token
+	}
+	url, err := GetURL(url)
+	if err != nil {
+		return err
+	}
+	request, _ := http.NewRequest("POST", url, nil)
+	_, err = client.Do(request)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(context.Stdout, c.msg())
+	return nil
+}
+
+func (c *resetPassword) Flags() *gnuflag.FlagSet {
+	fs := gnuflag.NewFlagSet("reset-password", gnuflag.ExitOnError)
+	fs.StringVar(&c.token, "token", "", "Token to reset the password")
+	fs.StringVar(&c.token, "t", "", "Token to reset the password")
+	return fs
 }
 
 func passwordFromReader(reader io.Reader) (string, error) {

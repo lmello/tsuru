@@ -19,13 +19,12 @@ import (
 	"github.com/globocom/tsuru/log"
 	"github.com/globocom/tsuru/provision"
 	"github.com/globocom/tsuru/queue"
+	"github.com/globocom/tsuru/quota"
 	"github.com/globocom/tsuru/repository"
 	"github.com/globocom/tsuru/service"
 	"io"
 	"labix.org/v2/mgo/bson"
-	"launchpad.net/goyaml"
 	"os"
-	"path"
 	"regexp"
 	"sort"
 	"strings"
@@ -43,27 +42,32 @@ var (
 // This struct holds information about the app: its name, address, list of
 // teams that have access to it, used platform, etc.
 type App struct {
-	Env       map[string]bind.EnvVar
-	Framework string
-	Name      string
-	Ip        string
-	CName     string
-	Units     []Unit
-	Teams     []string
-	hooks     *conf
+	Env      map[string]bind.EnvVar
+	Platform string `bson:"framework"`
+	Name     string
+	Ip       string
+	CName    string
+	Units    []Unit
+	Teams    []string
+	Owner    string
+	State    string
+	Deploys  uint
+
+	hr hookRunner
 }
 
 // MarshalJSON marshals the app in json format. It returns a JSON object with
-// the following keys: Name, Framework, Teams, Units, Repository and Ip.
+// the following keys: name, framework, teams, units, repository and ip.
 func (app *App) MarshalJSON() ([]byte, error) {
 	result := make(map[string]interface{})
-	result["Name"] = app.Name
-	result["Framework"] = app.Framework
-	result["Teams"] = app.Teams
-	result["Units"] = app.Units
-	result["Repository"] = repository.GetUrl(app.Name)
-	result["Ip"] = app.Ip
-	result["CName"] = app.CName
+	result["name"] = app.Name
+	result["platform"] = app.Platform
+	result["teams"] = app.Teams
+	result["units"] = app.Units
+	result["repository"] = repository.ReadWriteURL(app.Name)
+	result["ip"] = app.Ip
+	result["cname"] = app.CName
+	result["ready"] = app.State == "ready"
 	return json.Marshal(&result)
 }
 
@@ -73,11 +77,6 @@ type Applog struct {
 	Message string
 	Source  string
 	AppName string
-}
-
-type conf struct {
-	PreRestart []string `yaml:"pre-restart"`
-	PosRestart []string `yaml:"post-restart"`
 }
 
 // Get queries the database and fills the App object with data retrieved from
@@ -105,21 +104,26 @@ func (app *App) Get() error {
 //       3. Create S3 bucket for the app (if the bucket support is enabled)
 //       4. Create the git repository using gandalf
 //       5. Provision units within the provisioner
-func CreateApp(app *App, units uint, teams []auth.Team) error {
-	if units == 0 {
-		return &errors.ValidationError{Message: "Cannot create app with 0 units."}
+func CreateApp(app *App, user *auth.User) error {
+	teams, err := user.Teams()
+	if err != nil {
+		return err
 	}
 	if len(teams) == 0 {
 		return NoTeamsError{}
 	}
+	if _, err := getPlatform(app.Platform); err != nil {
+		return err
+	}
 	app.SetTeams(teams)
+	app.Owner = user.Email
 	if !app.isValid() {
 		msg := "Invalid app name, your app should have at most 63 " +
-			"characters, containing only lower case letters or numbers, " +
+			"characters, containing only lower case letters, numbers or dashes, " +
 			"starting with a letter."
 		return &errors.ValidationError{Message: msg}
 	}
-	actions := []*action.Action{&insertApp}
+	actions := []*action.Action{&reserveUserApp, &createAppQuota, &insertApp}
 	useS3, _ := config.GetBool("bucket-support")
 	if useS3 {
 		actions = append(actions, &createIAMUserAction,
@@ -127,11 +131,11 @@ func CreateApp(app *App, units uint, teams []auth.Team) error {
 			&createBucketAction, &createUserPolicyAction)
 	}
 	actions = append(actions, &exportEnvironmentsAction,
-		&createRepository, &provisionApp, &provisionAddUnits)
+		&createRepository, &provisionApp)
 	pipeline := action.NewPipeline(actions...)
-	err := pipeline.Execute(app, units)
+	err = pipeline.Execute(app, user)
 	if err != nil {
-		return &appCreationError{app: app.Name, err: err}
+		return &AppCreationError{app: app.Name, Err: err}
 	}
 	return nil
 }
@@ -180,8 +184,8 @@ func (app *App) unbind() error {
 //       3. Unbind all service instances from the app
 //       4. Remove the app from the database
 func ForceDestroy(app *App) error {
-	gUrl := repository.GitServerUri()
-	(&gandalf.Client{Endpoint: gUrl}).RemoveRepository(app.Name)
+	gURL := repository.ServerURL()
+	(&gandalf.Client{Endpoint: gURL}).RemoveRepository(app.Name)
 	useS3, _ := config.GetBool("bucket-support")
 	if useS3 {
 		destroyBucket(app)
@@ -192,11 +196,13 @@ func ForceDestroy(app *App) error {
 	}
 	token := app.Env["TSURU_APP_TOKEN"].Value
 	auth.DeleteToken(token)
+	quota.Release(app.Owner, app.Name)
 	conn, err := db.Conn()
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
+	quota.Delete(app.Name)
 	return conn.Apps().Remove(bson.M{"name": app.Name})
 }
 
@@ -207,10 +213,16 @@ func ForceDestroy(app *App) error {
 func (app *App) AddUnit(u *Unit) {
 	for i, unt := range app.Units {
 		if unt.Name == u.Name {
+			u.QuotaItem = unt.QuotaItem
+			app.Units[i] = *u
+			return
+		} else if unt.Name == "" && unt.QuotaItem == app.Name+"-0" {
+			u.QuotaItem = unt.QuotaItem
 			app.Units[i] = *u
 			return
 		}
 	}
+	u.QuotaItem = generateUnitQuotaItems(app, 1)[0]
 	app.Units = append(app.Units, *u)
 }
 
@@ -220,42 +232,11 @@ func (app *App) AddUnits(n uint) error {
 	if n == 0 {
 		return stderr.New("Cannot add zero units.")
 	}
-	units, err := Provisioner.AddUnits(app, n)
-	if err != nil {
-		return err
-	}
-	conn, err := db.Conn()
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	length := len(app.Units)
-	appUnits := make([]Unit, len(units))
-	app.Units = append(app.Units, appUnits...)
-	messages := make([]queue.Message, len(units)*2)
-	mCount := 0
-	for i, unit := range units {
-		app.Units[i+length] = Unit{
-			Name:       unit.Name,
-			Type:       unit.Type,
-			Ip:         unit.Ip,
-			Machine:    unit.Machine,
-			State:      provision.StatusPending.String(),
-			InstanceId: unit.InstanceId,
-		}
-		messages[mCount] = queue.Message{Action: RegenerateApprcAndStart, Args: []string{app.Name, unit.Name}}
-		messages[mCount+1] = queue.Message{Action: bindService, Args: []string{app.Name, unit.Name}}
-		mCount += 2
-	}
-	err = conn.Apps().Update(
-		bson.M{"name": app.Name},
-		bson.M{"$set": bson.M{"units": app.Units}},
-	)
-	if err != nil {
-		return err
-	}
-	go Enqueue(messages...)
-	return nil
+	return action.NewPipeline(
+		&reserveUnitsToAdd,
+		&provisionAddUnits,
+		&saveNewUnitsInDatabase,
+	).Execute(app, n)
 }
 
 // RemoveUnit removes a unit by its InstanceId or Name.
@@ -271,7 +252,7 @@ func (app *App) RemoveUnit(id string) error {
 		u    Unit
 	)
 	for i, u = range app.Units {
-		if u.InstanceId == id || u.GetName() == id {
+		if u.InstanceId == id || u.Name == id {
 			unit = u
 			break
 		}
@@ -347,12 +328,14 @@ func (app *App) RemoveUnits(n uint) error {
 	)
 	units := UnitSlice(app.Units)
 	sort.Sort(units)
+	items := make([]string, int(n))
 	for i := 0; i < int(n); i++ {
 		err = Provisioner.RemoveUnit(app, units[i].GetName())
 		if err == nil {
 			removed = append(removed, i)
 		}
 		app.unbindUnit(&units[i])
+		items[i] = units[i].QuotaItem
 	}
 	if len(removed) == 0 {
 		return err
@@ -367,6 +350,7 @@ func (app *App) RemoveUnits(n uint) error {
 		bson.M{"name": app.Name},
 		bson.M{"$set": bson.M{"units": app.Units}},
 	)
+	quota.Release(app.Name, items...)
 	if err == nil {
 		return dbErr
 	}
@@ -398,7 +382,7 @@ func (app *App) unbindUnit(unit provision.AppUnit) error {
 
 // Available returns true if at least one of N units is started.
 func (app *App) Available() bool {
-	for _, unit := range app.ProvisionUnits() {
+	for _, unit := range app.ProvisionedUnits() {
 		if unit.GetStatus() == provision.StatusStarted {
 			return true
 		}
@@ -477,7 +461,9 @@ func (app *App) setEnv(env bind.EnvVar) {
 		app.Env = make(map[string]bind.EnvVar)
 	}
 	app.Env[env.Name] = env
-	app.Log(fmt.Sprintf("setting env %s with value %s", env.Name, env.Value), "tsuru")
+	if env.Public {
+		app.Log(fmt.Sprintf("setting env %s with value %s", env.Name, env.Value), "tsuru")
+	}
 }
 
 // getEnv returns the environment variable if it's declared in the app. It will
@@ -513,128 +499,73 @@ func (app *App) InstanceEnv(name string) map[string]bind.EnvVar {
 	return envs
 }
 
-// loadHooks loads restart hooks from app.conf.
-//
-// app.conf uses YAML format, this function looks for two keys: pre-restart and
-// post-restart.
-func (app *App) loadHooks() error {
-	if app.hooks != nil {
-		return nil
-	}
-	app.hooks = new(conf)
-	uRepo, err := repository.GetPath()
-	if err != nil {
-		app.Log(fmt.Sprintf("Got error while getting repository path: %s", err), "tsuru")
-		return err
-	}
-	cmd := "cat " + path.Join(uRepo, "app.conf")
-	var buf bytes.Buffer
-	err = app.run(cmd, &buf)
-	if err != nil {
-		app.Log(fmt.Sprintf("Got error while executing command: %s... Skipping hooks execution", err), "tsuru")
-		return nil
-	}
-	err = goyaml.Unmarshal(buf.Bytes(), app.hooks)
-	if err != nil {
-		app.Log(fmt.Sprintf("Got error while parsing yaml: %s", err), "tsuru")
-		return err
-	}
-	return nil
-}
-
-// runHook executes the given list of commands, as a hook identified by the
-// kind string. If the list is empty, it returns nil.
-//
-// The hook itself may be "pre-restart" or "post-restart".
-func (app *App) runHook(w io.Writer, cmds []string, kind string) error {
-	if len(cmds) == 0 {
-		app.Log(fmt.Sprintf("Skipping %s hooks...", kind), "tsuru")
-		fmt.Fprintf(w, "Skipping %s hooks...", kind)
-		return nil
-	}
-	app.Log(fmt.Sprintf("Executing %s hook...", kind), "tsuru")
-	err := write(w, []byte("\n ---> Running "+kind+"\n"))
-	if err != nil {
-		return err
-	}
-	for _, cmd := range cmds {
-		p, err := deployHookAbsPath(cmd)
-		if err != nil {
-			app.Log(fmt.Sprintf("Error obtaining absolute path to hook: %s.", err), "tsuru")
-			continue
-		}
-		err = app.Run(p, w)
-		if err != nil {
-			return err
-		}
-	}
-	return err
-}
-
-// preRestart is responsible for running user's pre-restart script.
-//
-// The path to this script can be found at the app.conf file, at the root of user's app repository.
-func (app *App) preRestart(w io.Writer) error {
-	if err := app.loadHooks(); err != nil {
-		return err
-	}
-	return app.runHook(w, app.hooks.PreRestart, "pre-restart")
-}
-
-// posRestart is responsible for running user's post-restart script.
-//
-// The path to this script can be found at the app.conf file, at the root of
-// user's app repository.
-func (app *App) postRestart(w io.Writer) error {
-	if err := app.loadHooks(); err != nil {
-		return err
-	}
-	return app.runHook(w, app.hooks.PosRestart, "post-restart")
-}
-
 // Run executes the command in app units, sourcing apprc before running the
 // command.
-func (app *App) Run(cmd string, w io.Writer) error {
-	app.Log(fmt.Sprintf("running '%s'", cmd), "tsuru")
-	source := "[ -f /home/application/apprc ] && source /home/application/apprc"
-	cd := "[ -d /home/application/current ] && cd /home/application/current"
-	cmd = fmt.Sprintf("%s; %s; %s", source, cd, cmd)
-	return app.run(cmd, w)
-}
-
-func (app *App) run(cmd string, w io.Writer) error {
+func (app *App) Run(cmd string, w io.Writer, once bool) error {
 	if !app.Available() {
 		return stderr.New("App must be available to run commands")
+	}
+	app.Log(fmt.Sprintf("running '%s'", cmd), "tsuru")
+	return app.sourced(cmd, w, once)
+}
+
+func (app *App) sourced(cmd string, w io.Writer, once bool) error {
+	var mapEnv = func(name string) string {
+		if e, ok := app.Env[name]; ok {
+			return e.Value
+		}
+		if e := os.Getenv(name); e != "" {
+			return e
+		}
+		return "${" + name + "}"
+	}
+	source := "[ -f /home/application/apprc ] && source /home/application/apprc"
+	cd := "[ -d /home/application/current ] && cd /home/application/current"
+	cmd = fmt.Sprintf("%s; %s; %s", source, cd, os.Expand(cmd, mapEnv))
+	return app.run(cmd, w, once)
+}
+
+func (app *App) run(cmd string, w io.Writer, once bool) error {
+	if once {
+		return Provisioner.ExecuteCommandOnce(w, w, app, cmd)
 	}
 	return Provisioner.ExecuteCommand(w, w, app, cmd)
 }
 
-// Command is declared just to satisfy repository.Unit interface.
-func (app *App) Command(stdout, stderr io.Writer, cmdArgs ...string) error {
-	return Provisioner.ExecuteCommand(stdout, stderr, app, cmdArgs[0], cmdArgs[1:]...)
-}
-
 // Restart runs the restart hook for the app, writing its output to w.
 func (app *App) Restart(w io.Writer) error {
-	app.Log("executing hook to restart", "tsuru")
-	err := app.preRestart(w)
+	err := app.hookRunner().Restart(app, w, "before")
 	if err != nil {
 		return err
 	}
-	err = write(w, []byte("\n ---> Restarting your app\n"))
+	err = log.Write(w, []byte("\n ---> Restarting your app\n"))
 	if err != nil {
+		log.Printf("[restart] error on write app log for the app %s - %s", app.Name, err)
 		return err
 	}
 	err = Provisioner.Restart(app)
 	if err != nil {
+		log.Printf("[restart] error on restart the app %s - %s", app.Name, err)
 		return err
 	}
-	return app.postRestart(w)
+	return app.hookRunner().Restart(app, w, "after")
 }
 
-// InstallDeps runs the dependencies hook for the app, writing its output to w.
-func (app *App) InstallDeps(w io.Writer) error {
-	return app.run("/var/lib/tsuru/hooks/dependencies", w)
+func (app *App) hookRunner() hookRunner {
+	if app.hr == nil {
+		app.hr = &yamlHookRunner{}
+	}
+	return app.hr
+}
+
+func (app *App) Ready() error {
+	app.State = "ready"
+	conn, err := db.Conn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	return conn.Apps().Update(bson.M{"name": app.Name}, bson.M{"$set": bson.M{"state": "ready"}})
 }
 
 // GetUnits returns the internal list of units converted to bind.Unit.
@@ -657,14 +588,18 @@ func (app *App) GetIp() string {
 	return app.Ip
 }
 
-// GetFramework returns the framework of the app.
-func (app *App) GetFramework() string {
-	return app.Framework
+// GetPlatform returns the platform of the app.
+func (app *App) GetPlatform() string {
+	return app.Platform
 }
 
-// ProvisionUnits returns the internal list of units converted to
+func (app *App) GetDeploys() uint {
+	return app.Deploys
+}
+
+// ProvisionedUnits returns the internal list of units converted to
 // provision.AppUnit.
-func (app *App) ProvisionUnits() []provision.AppUnit {
+func (app *App) ProvisionedUnits() []provision.AppUnit {
 	units := make([]provision.AppUnit, len(app.Units))
 	for i, u := range app.Units {
 		other := u
@@ -677,7 +612,7 @@ func (app *App) ProvisionUnits() []provision.AppUnit {
 // SerializeEnvVars serializes the environment variables of the app. The
 // environment variables will be written the the file /home/application/apprc
 // in all units of the app.
-func (app *App) serializeEnvVars() error {
+func (app *App) SerializeEnvVars() error {
 	var buf bytes.Buffer
 	cmd := "cat > /home/application/apprc <<END\n"
 	cmd += fmt.Sprintf("# generated by tsuru at %s\n", time.Now().Format(time.RFC822Z))
@@ -685,7 +620,7 @@ func (app *App) serializeEnvVars() error {
 		cmd += fmt.Sprintf(`export %s="%s"`+"\n", k, v.Value)
 	}
 	cmd += "END\n"
-	err := app.run(cmd, &buf)
+	err := app.run(cmd, &buf, false)
 	if err != nil {
 		output := buf.Bytes()
 		if output == nil {
@@ -741,7 +676,7 @@ func (app *App) setEnvsToApp(envs []bind.EnvVar, publicOnly, useQueue bool) erro
 			Enqueue(queue.Message{Action: regenerateApprc, Args: []string{app.Name}})
 			return nil
 		}
-		go app.serializeEnvVars()
+		go app.SerializeEnvVars()
 	}
 	return nil
 }
@@ -773,17 +708,23 @@ func (app *App) UnsetEnvs(variableNames []string, publicOnly bool) error {
 		if err != nil {
 			return err
 		}
-		go app.serializeEnvVars()
+		go app.SerializeEnvVars()
 	}
 	return nil
 }
 
-// SetCName defines the CName of the app. It updates the attribute and saves
+// SetCName defines the CName of the app. It updates the attribute,
+// calls the SetCName function on the provisioner and saves
 // the app in the database, returning an error when it cannot save the change
-// in the database.
+// in the database or set the CName on the provisioner.
 func (app *App) SetCName(cname string) error {
 	if cname != "" && !cnameRegexp.MatchString(cname) {
 		return stderr.New("Invalid cname")
+	}
+	if s, ok := Provisioner.(provision.CNameManager); ok {
+		if err := s.SetCName(app, cname); err != nil {
+			return err
+		}
 	}
 	conn, err := db.Conn()
 	if err != nil {
@@ -791,6 +732,24 @@ func (app *App) SetCName(cname string) error {
 	}
 	defer conn.Close()
 	app.CName = cname
+	return conn.Apps().Update(
+		bson.M{"name": app.Name},
+		bson.M{"$set": bson.M{"cname": app.CName}},
+	)
+}
+
+func (app *App) UnsetCName() error {
+	if s, ok := Provisioner.(provision.CNameManager); ok {
+		if err := s.UnsetCName(app, app.CName); err != nil {
+			return err
+		}
+	}
+	conn, err := db.Conn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	app.CName = ""
 	return conn.Apps().Update(
 		bson.M{"name": app.Name},
 		bson.M{"$set": bson.M{"cname": app.CName}},
@@ -805,7 +764,7 @@ func (app *App) Log(message, source string) error {
 	for _, msg := range messages {
 		if msg != "" {
 			l := Applog{
-				Date:    time.Now(),
+				Date:    time.Now().In(time.UTC),
 				Message: msg,
 				Source:  source,
 				AppName: app.Name,
@@ -827,14 +786,14 @@ func (app *App) Log(message, source string) error {
 
 // LastLogs returns a list of the last `lines` log of the app, matching the
 // given source.
-func (a *App) LastLogs(lines int, source string) ([]Applog, error) {
+func (app *App) LastLogs(lines int, source string) ([]Applog, error) {
 	conn, err := db.Conn()
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
-	var logs []Applog
-	q := bson.M{"appname": a.Name}
+	logs := []Applog{}
+	q := bson.M{"appname": app.Name}
 	if source != "" {
 		q["source"] = source
 	}
@@ -877,36 +836,7 @@ func List(u *auth.User) ([]App, error) {
 	return apps, nil
 }
 
-// write writes the given content to the given writer, and handls short writes.
-func write(w io.Writer, content []byte) error {
-	n, err := w.Write(content)
-	if err != nil {
-		return err
-	}
-	if n != len(content) {
-		return io.ErrShortWrite
-	}
-	return nil
-}
-
-// deployHooksAbsPath returns the absolute path to execute the given command.
-// It first try to use the given path as a relative path from the app root,
-// then uses it as an absolute path.
-//
-// For example, deployHooksAbsPath("python") will return
-// "/home/application/current/python" if this file exist, otherwise, will
-// return just "python".
-func deployHookAbsPath(p string) (string, error) {
-	repoPath, err := config.GetString("git:unit-repo")
-	if err != nil {
-		return "", nil
-	}
-	cmdArgs := strings.Fields(p)
-	abs := path.Join(repoPath, cmdArgs[0])
-	_, err = os.Stat(abs)
-	if os.IsNotExist(err) {
-		return p, nil
-	}
-	cmdArgs[0] = abs
-	return strings.Join(cmdArgs, " "), nil
+// Swap calls the Provisioner.Swap.
+func Swap(app1, app2 *App) error {
+	return Provisioner.Swap(app1, app2)
 }

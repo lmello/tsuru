@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package api
 
 import (
 	"github.com/globocom/config"
@@ -13,11 +13,36 @@ import (
 	"github.com/globocom/tsuru/service"
 	tsuruTesting "github.com/globocom/tsuru/testing"
 	"io"
+	"io/ioutil"
 	"launchpad.net/gocheck"
+	"net/http"
 	"os"
 	"path"
 	"testing"
 )
+
+type testHandler struct {
+	body    [][]byte
+	method  []string
+	url     []string
+	content string
+	header  []http.Header
+}
+
+func (h *testHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.method = append(h.method, r.Method)
+	h.url = append(h.url, r.URL.String())
+	b, _ := ioutil.ReadAll(r.Body)
+	h.body = append(h.body, b)
+	h.header = append(h.header, r.Header)
+	w.Write([]byte(h.content))
+}
+
+type testBadHandler struct{}
+
+func (h *testBadHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	http.Error(w, "some error", http.StatusInternalServerError)
+}
 
 func Test(t *testing.T) { gocheck.TestingT(t) }
 
@@ -75,6 +100,8 @@ func (s *S) SetUpSuite(c *gocheck.C) {
 	s.t.SetGitConfs(c)
 	s.provisioner = tsuruTesting.NewFakeProvisioner()
 	app.Provisioner = s.provisioner
+	p := app.Platform{Name: "zend"}
+	s.conn.Platforms().Insert(p)
 }
 
 func (s *S) TearDownSuite(c *gocheck.C) {
@@ -82,7 +109,6 @@ func (s *S) TearDownSuite(c *gocheck.C) {
 	defer s.t.IamServer.Quit()
 	queue.Preempt()
 	s.conn.Apps().Database.DropDatabase()
-	fsystem = nil
 }
 
 func (s *S) TearDownTest(c *gocheck.C) {

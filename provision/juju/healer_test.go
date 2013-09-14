@@ -10,6 +10,7 @@ import (
 	"github.com/globocom/commandmocker"
 	"github.com/globocom/config"
 	"github.com/globocom/tsuru/app"
+	etesting "github.com/globocom/tsuru/exec/testing"
 	"github.com/globocom/tsuru/heal"
 	"labix.org/v2/mgo/bson"
 	"launchpad.net/goamz/aws"
@@ -21,20 +22,20 @@ import (
 	"net"
 )
 
-func (s *S) TestBootstrapInstanceIdHealerShouldBeRegistered(c *gocheck.C) {
-	h, err := heal.Get("bootstrap-instanceid")
+func (s *S) TestBootstrapInstanceIDHealerShouldBeRegistered(c *gocheck.C) {
+	h, err := heal.Get("juju", "bootstrap-instanceid")
 	c.Assert(err, gocheck.IsNil)
-	c.Assert(h, gocheck.FitsTypeOf, bootstrapInstanceIdHealer{})
+	c.Assert(h, gocheck.FitsTypeOf, bootstrapInstanceIDHealer{})
 }
 
-func (s *S) TestBootstrapInstanceIdHealerNeedsHeal(c *gocheck.C) {
+func (s *S) TestBootstrapInstanceIDHealerNeedsHeal(c *gocheck.C) {
 	ec2Server, err := ec2test.NewServer()
 	c.Assert(err, gocheck.IsNil)
 	defer ec2Server.Quit()
 	s3Server, err := s3test.NewServer(nil)
 	c.Assert(err, gocheck.IsNil)
 	defer s3Server.Quit()
-	h := bootstrapInstanceIdHealer{}
+	h := bootstrapInstanceIDHealer{}
 	region := aws.SAEast
 	region.EC2Endpoint = ec2Server.URL()
 	region.S3Endpoint = s3Server.URL()
@@ -50,14 +51,14 @@ func (s *S) TestBootstrapInstanceIdHealerNeedsHeal(c *gocheck.C) {
 	c.Assert(h.needsHeal(), gocheck.Equals, true)
 }
 
-func (s *S) TestBootstrapInstanceIdHealerNotNeedsHeal(c *gocheck.C) {
+func (s *S) TestBootstrapInstanceIDHealerNotNeedsHeal(c *gocheck.C) {
 	ec2Server, err := ec2test.NewServer()
 	c.Assert(err, gocheck.IsNil)
 	defer ec2Server.Quit()
 	s3Server, err := s3test.NewServer(nil)
 	c.Assert(err, gocheck.IsNil)
 	defer s3Server.Quit()
-	h := bootstrapInstanceIdHealer{}
+	h := bootstrapInstanceIDHealer{}
 	region := aws.SAEast
 	region.EC2Endpoint = ec2Server.URL()
 	region.S3Endpoint = s3Server.URL()
@@ -77,14 +78,14 @@ func (s *S) TestBootstrapInstanceIdHealerNotNeedsHeal(c *gocheck.C) {
 	c.Assert(h.needsHeal(), gocheck.Equals, false)
 }
 
-func (s *S) TestBootstrapInstanceIdHealerHeal(c *gocheck.C) {
+func (s *S) TestBootstrapInstanceIDHealerHeal(c *gocheck.C) {
 	ec2Server, err := ec2test.NewServer()
 	c.Assert(err, gocheck.IsNil)
 	defer ec2Server.Quit()
 	s3Server, err := s3test.NewServer(nil)
 	c.Assert(err, gocheck.IsNil)
 	defer s3Server.Quit()
-	h := bootstrapInstanceIdHealer{}
+	h := bootstrapInstanceIDHealer{}
 	region := aws.SAEast
 	region.EC2Endpoint = ec2Server.URL()
 	region.S3Endpoint = s3Server.URL()
@@ -109,20 +110,20 @@ func (s *S) TestBootstrapInstanceIdHealerHeal(c *gocheck.C) {
 	c.Assert(string(data), gocheck.Equals, expected)
 }
 
-func (s *S) TestBootstrapInstanceIdHealerEC2(c *gocheck.C) {
-	h := bootstrapInstanceIdHealer{}
+func (s *S) TestBootstrapInstanceIDHealerEC2(c *gocheck.C) {
+	h := bootstrapInstanceIDHealer{}
 	ec2 := h.ec2()
 	c.Assert(ec2.EC2Endpoint, gocheck.Equals, "")
 }
 
-func (s *S) TestBootstrapInstanceIdHealerS3(c *gocheck.C) {
-	h := bootstrapInstanceIdHealer{}
+func (s *S) TestBootstrapInstanceIDHealerS3(c *gocheck.C) {
+	h := bootstrapInstanceIDHealer{}
 	s3 := h.s3()
 	c.Assert(s3.Region, gocheck.DeepEquals, aws.USEast)
 }
 
 func (s *S) TestInstanceAgentsConfigHealerShouldBeRegistered(c *gocheck.C) {
-	h, err := heal.Get("instance-agents-config")
+	h, err := heal.Get("juju", "instance-agents-config")
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(h, gocheck.FitsTypeOf, instanceAgentsConfigHealer{})
 }
@@ -141,8 +142,8 @@ func (s *S) TestInstanceAgenstConfigHealerHeal(c *gocheck.C) {
 	p := JujuProvisioner{}
 	m := machine{
 		AgentState:    "not-started",
-		IpAddress:     "localhost",
-		InstanceId:    id,
+		IPAddress:     "localhost",
+		InstanceID:    id,
 		InstanceState: "running",
 	}
 	p.saveBootstrapMachine(m)
@@ -174,7 +175,7 @@ func (s *S) TestInstanceAgenstConfigHealerHeal(c *gocheck.C) {
 		"ubuntu",
 		"server-1081.novalocal",
 		"grep",
-		"",
+		"i-0.internal.invalid",
 		"/etc/init/juju-machine-agent.conf",
 		"-o",
 		"StrictHostKeyChecking no",
@@ -185,7 +186,7 @@ func (s *S) TestInstanceAgenstConfigHealerHeal(c *gocheck.C) {
 		"sudo",
 		"sed",
 		"-i",
-		"'s/env JUJU_ZOOKEEPER=.*/env JUJU_ZOOKEEPER=\":2181\"/g'",
+		"'s/env JUJU_ZOOKEEPER=.*/env JUJU_ZOOKEEPER=\"i-0.internal.invalid:2181\"/g'",
 		"/etc/init/juju-machine-agent.conf",
 		"-o",
 		"StrictHostKeyChecking no",
@@ -194,7 +195,7 @@ func (s *S) TestInstanceAgenstConfigHealerHeal(c *gocheck.C) {
 		"ubuntu",
 		"server-1081.novalocal",
 		"grep",
-		"",
+		"i-0.internal.invalid",
 		"/etc/init/juju-as_i_rise-0.conf",
 		"-o",
 		"StrictHostKeyChecking no",
@@ -205,7 +206,7 @@ func (s *S) TestInstanceAgenstConfigHealerHeal(c *gocheck.C) {
 		"sudo",
 		"sed",
 		"-i",
-		"'s/env JUJU_ZOOKEEPER=.*/env JUJU_ZOOKEEPER=\":2181\"/g'",
+		"'s/env JUJU_ZOOKEEPER=.*/env JUJU_ZOOKEEPER=\"i-0.internal.invalid:2181\"/g'",
 		"/etc/init/juju-as_i_rise-0.conf",
 	}
 	c.Assert(commandmocker.Ran(sshTmpdir), gocheck.Equals, true)
@@ -216,8 +217,8 @@ func (s *S) TestInstanceAgenstConfigHealerHealAWSFailure(c *gocheck.C) {
 	p := JujuProvisioner{}
 	m := machine{
 		AgentState:    "not-started",
-		IpAddress:     "localhost",
-		InstanceId:    "i-0800",
+		IPAddress:     "localhost",
+		InstanceID:    "i-0800",
 		InstanceState: "running",
 	}
 	p.saveBootstrapMachine(m)
@@ -250,8 +251,8 @@ func (s *S) TestBootstrapPrivateDns(c *gocheck.C) {
 	p := JujuProvisioner{}
 	m := machine{
 		AgentState:    "running",
-		IpAddress:     "localhost",
-		InstanceId:    instance.InstanceId,
+		IPAddress:     "localhost",
+		InstanceID:    instance.InstanceId,
 		InstanceState: "running",
 	}
 	p.saveBootstrapMachine(m)
@@ -280,12 +281,17 @@ func (s *S) TestGetPrivateDns(c *gocheck.C) {
 }
 
 func (s *S) TestInstanceUnitShouldBeRegistered(c *gocheck.C) {
-	h, err := heal.Get("instance-unit")
+	h, err := heal.Get("juju", "instance-unit")
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(h, gocheck.FitsTypeOf, instanceUnitHealer{})
 }
 
 func (s *S) TestInstaceUnitHealWhenEverythingIsOk(c *gocheck.C) {
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	a := []app.App{
 		{Name: "as_i_rise", Units: []app.Unit{{Name: "as_i_rise/0", State: "started", Ip: "server-1081.novalocal"}}},
 		{Name: "the_infanta", Units: []app.Unit{{Name: "the_infanta/0", State: "started", Ip: "server-1086.novalocal"}}},
@@ -293,15 +299,17 @@ func (s *S) TestInstaceUnitHealWhenEverythingIsOk(c *gocheck.C) {
 	err := s.conn.Apps().Insert(&a)
 	c.Assert(err, gocheck.IsNil)
 	defer s.conn.Apps().RemoveAll(bson.M{"name": bson.M{"$in": []string{"as_i_rise", "the_infanta"}}})
-	sshTmpdir, err := commandmocker.Add("ssh", "$*")
-	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(sshTmpdir)
 	h := instanceUnitHealer{}
 	err = h.Heal()
-	c.Assert(commandmocker.Ran(sshTmpdir), gocheck.Equals, false)
+	c.Assert(err, gocheck.IsNil)
 }
 
 func (s *S) TestInstaceUnitHeal(c *gocheck.C) {
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	a := app.App{
 		Name:  "as_i_rise",
 		Units: []app.Unit{{Name: "as_i_rise/0", State: "down", Ip: "server-1081.novalocal"}},
@@ -309,10 +317,10 @@ func (s *S) TestInstaceUnitHeal(c *gocheck.C) {
 	err := s.conn.Apps().Insert(&a)
 	c.Assert(err, gocheck.IsNil)
 	defer s.conn.Apps().Remove(bson.M{"name": "as_i_rise"})
-	sshTmpdir, err := commandmocker.Add("ssh", "$*")
+	h := instanceUnitHealer{}
+	err = h.Heal()
 	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(sshTmpdir)
-	sshOutput := []string{
+	args := []string{
 		"-o",
 		"StrictHostKeyChecking no",
 		"-q",
@@ -322,6 +330,9 @@ func (s *S) TestInstaceUnitHeal(c *gocheck.C) {
 		"sudo",
 		"stop",
 		"juju-as_i_rise-0",
+	}
+	c.Assert(fexec.ExecutedCmd("ssh", args), gocheck.Equals, true)
+	args = []string{
 		"-o",
 		"StrictHostKeyChecking no",
 		"-q",
@@ -332,48 +343,47 @@ func (s *S) TestInstaceUnitHeal(c *gocheck.C) {
 		"start",
 		"juju-as_i_rise-0",
 	}
-	h := instanceUnitHealer{}
-	err = h.Heal()
-	c.Assert(err, gocheck.IsNil)
-	c.Assert(commandmocker.Ran(sshTmpdir), gocheck.Equals, true)
-	c.Assert(commandmocker.Parameters(sshTmpdir), gocheck.DeepEquals, sshOutput)
+	c.Assert(fexec.ExecutedCmd("ssh", args), gocheck.Equals, true)
 }
 
 func (s *S) TestInstanceMachineShouldBeRegistered(c *gocheck.C) {
-	h, err := heal.Get("instance-machine")
+	h, err := heal.Get("juju", "instance-machine")
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(h, gocheck.FitsTypeOf, instanceMachineHealer{})
 }
 
 func (s *S) TestInstanceMachineHealWhenEverythingIsOk(c *gocheck.C) {
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	jujuTmpdir, err := commandmocker.Add("juju", collectOutput)
 	c.Assert(err, gocheck.IsNil)
 	defer commandmocker.Remove(jujuTmpdir)
-	sshTmpdir, err := commandmocker.Add("ssh", "$*")
-	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(sshTmpdir)
-	jujuOutput := []string{
-		"status", // for juju status that gets the output
-	}
 	h := instanceMachineHealer{}
 	err = h.Heal()
 	c.Assert(err, gocheck.IsNil)
+	args := []string{
+		"status", // for juju status that gets the output
+	}
 	c.Assert(commandmocker.Ran(jujuTmpdir), gocheck.Equals, true)
-	c.Assert(commandmocker.Parameters(jujuTmpdir), gocheck.DeepEquals, jujuOutput)
-	c.Assert(commandmocker.Ran(sshTmpdir), gocheck.Equals, false)
+	c.Assert(commandmocker.Parameters(jujuTmpdir), gocheck.DeepEquals, args)
 }
 
 func (s *S) TestInstanceMachineHeal(c *gocheck.C) {
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	jujuTmpdir, err := commandmocker.Add("juju", collectOutputInstanceDown)
 	c.Assert(err, gocheck.IsNil)
 	defer commandmocker.Remove(jujuTmpdir)
-	sshTmpdir, err := commandmocker.Add("ssh", "$*")
+	h := instanceMachineHealer{}
+	err = h.Heal()
 	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(sshTmpdir)
-	jujuOutput := []string{
-		"status", // for juju status that gets the output
-	}
-	sshOutput := []string{
+	args := []string{
 		"-o",
 		"StrictHostKeyChecking no",
 		"-q",
@@ -383,6 +393,9 @@ func (s *S) TestInstanceMachineHeal(c *gocheck.C) {
 		"sudo",
 		"stop",
 		"juju-machine-agent",
+	}
+	c.Assert(fexec.ExecutedCmd("ssh", args), gocheck.Equals, true)
+	args = []string{
 		"-o",
 		"StrictHostKeyChecking no",
 		"-q",
@@ -393,17 +406,16 @@ func (s *S) TestInstanceMachineHeal(c *gocheck.C) {
 		"start",
 		"juju-machine-agent",
 	}
-	h := instanceMachineHealer{}
-	err = h.Heal()
-	c.Assert(err, gocheck.IsNil)
+	c.Assert(fexec.ExecutedCmd("ssh", args), gocheck.Equals, true)
+	args = []string{
+		"status", // for juju status that gets the output
+	}
 	c.Assert(commandmocker.Ran(jujuTmpdir), gocheck.Equals, true)
-	c.Assert(commandmocker.Parameters(jujuTmpdir), gocheck.DeepEquals, jujuOutput)
-	c.Assert(commandmocker.Ran(sshTmpdir), gocheck.Equals, true)
-	c.Assert(commandmocker.Parameters(sshTmpdir), gocheck.DeepEquals, sshOutput)
+	c.Assert(commandmocker.Parameters(jujuTmpdir), gocheck.DeepEquals, args)
 }
 
 func (s *S) TestZookeeperHealerShouldBeRegistered(c *gocheck.C) {
-	h, err := heal.Get("zookeeper")
+	h, err := heal.Get("juju", "zookeeper")
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(h, gocheck.FitsTypeOf, zookeeperHealer{})
 }
@@ -420,8 +432,8 @@ func (s *S) TestZookeeperNeedsHeal(c *gocheck.C) {
 	p := JujuProvisioner{}
 	m := machine{
 		AgentState:    "not-started",
-		IpAddress:     "localhost",
-		InstanceId:    "i-00000376",
+		IPAddress:     "localhost",
+		InstanceID:    "i-00000376",
 		InstanceState: "running",
 	}
 	p.saveBootstrapMachine(m)
@@ -436,8 +448,8 @@ func (s *S) TestZookeeperNeedsHealConnectionRefused(c *gocheck.C) {
 	p := JujuProvisioner{}
 	m := machine{
 		AgentState:    "not-started",
-		IpAddress:     "localhost",
-		InstanceId:    "i-00000376",
+		IPAddress:     "localhost",
+		InstanceID:    "i-00000376",
 		InstanceState: "running",
 	}
 	p.saveBootstrapMachine(m)
@@ -457,8 +469,8 @@ func (s *S) TestZookeeperNotNeedsHeal(c *gocheck.C) {
 	p := JujuProvisioner{}
 	m := machine{
 		AgentState:    "not-started",
-		IpAddress:     "localhost",
-		InstanceId:    "i-00000376",
+		IPAddress:     "localhost",
+		InstanceID:    "i-00000376",
 		InstanceState: "running",
 	}
 	p.saveBootstrapMachine(m)
@@ -467,6 +479,11 @@ func (s *S) TestZookeeperNotNeedsHeal(c *gocheck.C) {
 }
 
 func (s *S) TestZookeeperHealerHeal(c *gocheck.C) {
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	ln, err := net.Listen("tcp", ":2181")
 	c.Assert(err, gocheck.IsNil)
 	defer ln.Close()
@@ -478,18 +495,18 @@ func (s *S) TestZookeeperHealerHeal(c *gocheck.C) {
 	p := JujuProvisioner{}
 	m := machine{
 		AgentState:    "not-started",
-		IpAddress:     "localhost",
-		InstanceId:    "i-00000376",
+		IPAddress:     "localhost",
+		InstanceID:    "i-00000376",
 		InstanceState: "running",
 	}
 	p.saveBootstrapMachine(m)
 	conn, collection := p.bootstrapCollection()
 	defer conn.Close()
 	defer collection.Remove(m)
-	sshTmpdir, err := commandmocker.Add("ssh", "$*")
+	h := zookeeperHealer{}
+	err = h.Heal()
 	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(sshTmpdir)
-	sshOutput := []string{
+	args := []string{
 		"-o",
 		"StrictHostKeyChecking no",
 		"-q",
@@ -499,6 +516,9 @@ func (s *S) TestZookeeperHealerHeal(c *gocheck.C) {
 		"sudo",
 		"stop",
 		"zookeeper",
+	}
+	c.Assert(fexec.ExecutedCmd("ssh", args), gocheck.Equals, true)
+	args = []string{
 		"-o",
 		"StrictHostKeyChecking no",
 		"-q",
@@ -509,35 +529,33 @@ func (s *S) TestZookeeperHealerHeal(c *gocheck.C) {
 		"start",
 		"zookeeper",
 	}
-	h := zookeeperHealer{}
-	err = h.Heal()
-	c.Assert(err, gocheck.IsNil)
-	c.Assert(commandmocker.Ran(sshTmpdir), gocheck.Equals, true)
-	c.Assert(commandmocker.Parameters(sshTmpdir), gocheck.DeepEquals, sshOutput)
+	c.Assert(fexec.ExecutedCmd("ssh", args), gocheck.Equals, true)
 }
 
 func (s *S) TestBootstrapProvisionHealerShouldBeRegistered(c *gocheck.C) {
-	h, err := heal.Get("bootstrap-provision")
+	h, err := heal.Get("juju", "bootstrap-provision")
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(h, gocheck.FitsTypeOf, bootstrapProvisionHealer{})
 }
 
 func (s *S) TestBootstrapProvisionHealerHeal(c *gocheck.C) {
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	p := JujuProvisioner{}
 	m := machine{
 		AgentState:    "not-started",
-		IpAddress:     "localhost",
-		InstanceId:    "i-00000376",
+		IPAddress:     "localhost",
+		InstanceID:    "i-00000376",
 		InstanceState: "running",
 	}
 	p.saveBootstrapMachine(m)
 	conn, collection := p.bootstrapCollection()
 	defer conn.Close()
 	defer collection.Remove(m)
-	sshTmpdir, err := commandmocker.Add("ssh", "$*")
-	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(sshTmpdir)
-	sshOutput := []string{
+	args := []string{
 		"-o",
 		"StrictHostKeyChecking no",
 		"-q",
@@ -549,14 +567,13 @@ func (s *S) TestBootstrapProvisionHealerHeal(c *gocheck.C) {
 		"juju-provision-agent",
 	}
 	h := bootstrapProvisionHealer{}
-	err = h.Heal()
+	err := h.Heal()
 	c.Assert(err, gocheck.IsNil)
-	c.Assert(commandmocker.Ran(sshTmpdir), gocheck.Equals, true)
-	c.Assert(commandmocker.Parameters(sshTmpdir), gocheck.DeepEquals, sshOutput)
+	c.Assert(fexec.ExecutedCmd("ssh", args), gocheck.Equals, true)
 }
 
 func (s *S) TestBootstrapMachineHealerShouldBeRegistered(c *gocheck.C) {
-	h, err := heal.Get("bootstrap")
+	h, err := heal.Get("juju", "bootstrap")
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(h, gocheck.FitsTypeOf, bootstrapMachineHealer{})
 }
@@ -565,8 +582,8 @@ func (s *S) TestBootstrapMachineHealerNeedsHeal(c *gocheck.C) {
 	p := JujuProvisioner{}
 	m := machine{
 		AgentState:    "not-started",
-		IpAddress:     "localhost",
-		InstanceId:    "i-00000376",
+		IPAddress:     "localhost",
+		InstanceID:    "i-00000376",
 		InstanceState: "running",
 	}
 	p.saveBootstrapMachine(m)
@@ -586,21 +603,26 @@ func (s *S) TestBootstrapMachineHealerDontNeedsHeal(c *gocheck.C) {
 }
 
 func (s *S) TestBootstrapMachineHealerHeal(c *gocheck.C) {
+	fexec := &etesting.FakeExecutor{}
+	execut = fexec
+	defer func() {
+		execut = nil
+	}()
 	p := JujuProvisioner{}
 	m := machine{
 		AgentState:    "not-started",
-		IpAddress:     "localhost",
-		InstanceId:    "i-00000376",
+		IPAddress:     "localhost",
+		InstanceID:    "i-00000376",
 		InstanceState: "running",
 	}
 	p.saveBootstrapMachine(m)
 	conn, collection := p.bootstrapCollection()
 	defer conn.Close()
 	defer collection.Remove(m)
-	sshTmpdir, err := commandmocker.Add("ssh", "$*")
+	h := bootstrapMachineHealer{}
+	err := h.Heal()
 	c.Assert(err, gocheck.IsNil)
-	defer commandmocker.Remove(sshTmpdir)
-	sshOutput := []string{
+	args := []string{
 		"-o",
 		"StrictHostKeyChecking no",
 		"-q",
@@ -610,6 +632,9 @@ func (s *S) TestBootstrapMachineHealerHeal(c *gocheck.C) {
 		"sudo",
 		"stop",
 		"juju-machine-agent",
+	}
+	c.Assert(fexec.ExecutedCmd("ssh", args), gocheck.Equals, true)
+	args = []string{
 		"-o",
 		"StrictHostKeyChecking no",
 		"-q",
@@ -620,19 +645,15 @@ func (s *S) TestBootstrapMachineHealerHeal(c *gocheck.C) {
 		"start",
 		"juju-machine-agent",
 	}
-	h := bootstrapMachineHealer{}
-	err = h.Heal()
-	c.Assert(err, gocheck.IsNil)
-	c.Assert(commandmocker.Ran(sshTmpdir), gocheck.Equals, true)
-	c.Assert(commandmocker.Parameters(sshTmpdir), gocheck.DeepEquals, sshOutput)
+	c.Assert(fexec.ExecutedCmd("ssh", args), gocheck.Equals, true)
 }
 
 func (s *S) TestBootstrapMachineHealerOnlyHealsWhenItIsNeeded(c *gocheck.C) {
 	p := JujuProvisioner{}
 	m := machine{
 		AgentState:    "running",
-		IpAddress:     "10.10.10.96",
-		InstanceId:    "i-00000376",
+		IPAddress:     "10.10.10.96",
+		InstanceID:    "i-00000376",
 		InstanceState: "running",
 	}
 	p.saveBootstrapMachine(m)
@@ -645,7 +666,7 @@ func (s *S) TestBootstrapMachineHealerOnlyHealsWhenItIsNeeded(c *gocheck.C) {
 }
 
 func (s *S) TestELBInstanceHealerShouldBeRegistered(c *gocheck.C) {
-	h, err := heal.Get("elb-instance")
+	h, err := heal.Get("juju", "elb-instance")
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(h, gocheck.FitsTypeOf, elbInstanceHealer{})
 }

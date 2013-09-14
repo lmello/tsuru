@@ -12,24 +12,45 @@ import (
 	"github.com/globocom/config"
 	"github.com/globocom/tsuru/app"
 	"github.com/globocom/tsuru/db"
+	"github.com/globocom/tsuru/deploy"
+	"github.com/globocom/tsuru/exec"
 	"github.com/globocom/tsuru/log"
 	"github.com/globocom/tsuru/provision"
 	"github.com/globocom/tsuru/queue"
 	"github.com/globocom/tsuru/repository"
+	"github.com/globocom/tsuru/router"
+	_ "github.com/globocom/tsuru/router/elb"
 	"github.com/globocom/tsuru/safe"
 	"io"
 	"labix.org/v2/mgo"
 	"labix.org/v2/mgo/bson"
 	"launchpad.net/goyaml"
-	"os/exec"
+	osexec "os/exec"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 func init() {
 	provision.Register("juju", &JujuProvisioner{})
+}
+
+var execut exec.Executor
+var execMut sync.RWMutex
+
+func executor() exec.Executor {
+	execMut.RLock()
+	defer execMut.RUnlock()
+	if execut == nil {
+		execMut.RUnlock()
+		execMut.Lock()
+		execut = exec.OsExecutor{}
+		execMut.Unlock()
+		execMut.RLock()
+	}
+	return execut
 }
 
 // Sometimes juju gives the "no node" error when destroying a service or
@@ -51,6 +72,10 @@ func (p *JujuProvisioner) elbSupport() bool {
 		p.elb = &elb
 	}
 	return *p.elb
+}
+
+func Router() (router.Router, error) {
+	return router.Get("elb")
 }
 
 func (p *JujuProvisioner) unitsCollection() (*db.Storage, *mgo.Collection) {
@@ -85,7 +110,7 @@ func (p *JujuProvisioner) Provision(app provision.App) error {
 	}
 	args := []string{
 		"deploy", "--repository", charms,
-		"local:" + app.GetFramework(), app.GetName(),
+		"local:" + app.GetPlatform(), app.GetName(),
 	}
 	err = runCmd(false, &buf, &buf, args...)
 	out := buf.String()
@@ -94,11 +119,15 @@ func (p *JujuProvisioner) Provision(app provision.App) error {
 		return cmdError(out, err, args)
 	}
 	setOption := []string{
-		"set", app.GetName(), "app-repo=" + repository.GetReadOnlyUrl(app.GetName()),
+		"set", app.GetName(), "app-repo=" + repository.ReadOnlyURL(app.GetName()),
 	}
 	runCmd(true, &buf, &buf, setOption...)
 	if p.elbSupport() {
-		if err = p.LoadBalancer().Create(app); err != nil {
+		router, err := Router()
+		if err != nil {
+			return err
+		}
+		if err = router.AddBackend(app.GetName()); err != nil {
 			return err
 		}
 		p.enqueueUnits(app.GetName())
@@ -115,6 +144,23 @@ func (p *JujuProvisioner) Restart(app provision.App) error {
 		return &provision.Error{Reason: buf.String(), Err: err}
 	}
 	return nil
+}
+
+func (JujuProvisioner) Swap(app1, app2 provision.App) error {
+	r, err := Router()
+	if err != nil {
+		return err
+	}
+	return r.Swap(app1.GetName(), app2.GetName())
+}
+
+func (p *JujuProvisioner) Deploy(a provision.App, version string, w io.Writer) error {
+	var buf bytes.Buffer
+	setOption := []string{"set", a.GetName(), "app-version=" + version}
+	if err := runCmd(true, &buf, &buf, setOption...); err != nil {
+		log.Printf("juju: Failed to set app-version. Error: %s.\nCommand output: %s", err, &buf)
+	}
+	return deploy.Git(p, a, version, w)
 }
 
 func (p *JujuProvisioner) destroyService(app provision.App) error {
@@ -145,7 +191,7 @@ func (p *JujuProvisioner) destroyService(app provision.App) error {
 func (p *JujuProvisioner) terminateMachines(app provision.App, units ...provision.AppUnit) error {
 	var buf bytes.Buffer
 	if len(units) < 1 {
-		units = app.ProvisionUnits()
+		units = app.ProvisionedUnits()
 	}
 	for _, u := range units {
 		buf.Reset()
@@ -162,7 +208,7 @@ func (p *JujuProvisioner) terminateMachines(app provision.App, units ...provisio
 }
 
 func (p *JujuProvisioner) deleteUnits(app provision.App) {
-	units := app.ProvisionUnits()
+	units := app.ProvisionedUnits()
 	names := make([]string, len(units))
 	for i, u := range units {
 		names[i] = u.GetName()
@@ -178,7 +224,11 @@ func (p *JujuProvisioner) Destroy(app provision.App) error {
 		return err
 	}
 	if p.elbSupport() {
-		err = p.LoadBalancer().Destroy(app)
+		router, err := Router()
+		if err != nil {
+			return err
+		}
+		err = router.RemoveBackend(app.GetName())
 	}
 	go p.terminateMachines(app)
 	p.deleteUnits(app)
@@ -211,21 +261,20 @@ func (p *JujuProvisioner) AddUnits(app provision.App, n uint) ([]provision.Unit,
 	unitRe := regexp.MustCompile(fmt.Sprintf(
 		`Unit '(%s/\d+)' added to service '%s'`, app.GetName(), app.GetName()),
 	)
-	reader := bufio.NewReader(&buf)
-	line, err := reader.ReadString('\n')
+	scanner := bufio.NewScanner(&buf)
+	scanner.Split(bufio.ScanLines)
 	names := make([]string, n)
 	units = make([]provision.Unit, n)
 	i := 0
-	for err == nil {
-		matches := unitRe.FindStringSubmatch(line)
+	for scanner.Scan() {
+		matches := unitRe.FindStringSubmatch(scanner.Text())
 		if len(matches) > 1 {
 			units[i] = provision.Unit{Name: matches[1]}
 			names[i] = matches[1]
 			i++
 		}
-		line, err = reader.ReadString('\n')
 	}
-	if err != io.EOF {
+	if err := scanner.Err(); err != nil {
 		return nil, &provision.Error{Reason: buf.String(), Err: err}
 	}
 	if p.elbSupport() {
@@ -257,11 +306,11 @@ func (p *JujuProvisioner) removeUnit(app provision.App, unit provision.AppUnit) 
 		return cmdError(buf.String(), err, cmd)
 	}
 	if p.elbSupport() {
-		pUnit := provision.Unit{
-			Name:       unit.GetName(),
-			InstanceId: unit.GetInstanceId(),
+		router, err := Router()
+		if err != nil {
+			return err
 		}
-		err = p.LoadBalancer().Deregister(app, pUnit)
+		err = router.RemoveRoute(app.GetName(), unit.GetInstanceId())
 	}
 	conn, collection := p.unitsCollection()
 	defer conn.Close()
@@ -272,7 +321,7 @@ func (p *JujuProvisioner) removeUnit(app provision.App, unit provision.AppUnit) 
 
 func (p *JujuProvisioner) RemoveUnit(app provision.App, name string) error {
 	var unit provision.AppUnit
-	for _, unit = range app.ProvisionUnits() {
+	for _, unit = range app.ProvisionedUnits() {
 		if unit.GetName() == name {
 			break
 		}
@@ -283,9 +332,46 @@ func (p *JujuProvisioner) RemoveUnit(app provision.App, name string) error {
 	return p.removeUnit(app, unit)
 }
 
-func (p *JujuProvisioner) ExecuteCommand(stdout, stderr io.Writer, app provision.App, cmd string, args ...string) error {
+func (p *JujuProvisioner) InstallDeps(app provision.App, w io.Writer) error {
+	return app.Run("/var/lib/tsuru/hooks/dependencies", w, false)
+}
+
+func (*JujuProvisioner) startedUnits(app provision.App) []provision.AppUnit {
+	units := []provision.AppUnit{}
+	allUnits := app.ProvisionedUnits()
+	for _, unit := range allUnits {
+		if status := unit.GetStatus(); status == provision.StatusStarted {
+			units = append(units, unit)
+		}
+	}
+	return units
+}
+
+func (*JujuProvisioner) executeCommandViaSSH(stdout, stderr io.Writer, machine int, cmd string, args ...string) error {
 	arguments := []string{"ssh", "-o", "StrictHostKeyChecking no", "-q"}
-	units := app.ProvisionUnits()
+	arguments = append(arguments, strconv.Itoa(machine), cmd)
+	arguments = append(arguments, args...)
+	err := runCmd(true, stdout, stderr, arguments...)
+	fmt.Fprintln(stdout)
+	if err != nil {
+		log.Printf("error on execute cmd %s on machine %d", cmd, machine)
+		return err
+	}
+	return nil
+}
+
+func (p *JujuProvisioner) ExecuteCommandOnce(stdout, stderr io.Writer, app provision.App, cmd string, args ...string) error {
+	units := p.startedUnits(app)
+	if len(units) > 0 {
+		unit := units[0]
+		return p.executeCommandViaSSH(stdout, stderr, unit.GetMachine(), cmd, args...)
+	}
+	return nil
+}
+
+func (p *JujuProvisioner) ExecuteCommand(stdout, stderr io.Writer, app provision.App, cmd string, args ...string) error {
+	units := p.startedUnits(app)
+	log.Printf("[execute cmd] - provisioned unit %#v", units)
 	length := len(units)
 	for i, unit := range units {
 		if length > 1 {
@@ -293,18 +379,8 @@ func (p *JujuProvisioner) ExecuteCommand(stdout, stderr io.Writer, app provision
 				fmt.Fprintln(stdout)
 			}
 			fmt.Fprintf(stdout, "Output from unit %q:\n\n", unit.GetName())
-			if status := unit.GetStatus(); status != provision.StatusStarted {
-				fmt.Fprintf(stdout, "Unit state is %q, it must be %q for running commands.\n",
-					status, provision.StatusStarted)
-				continue
-			}
 		}
-		var cmdargs []string
-		cmdargs = append(cmdargs, arguments...)
-		cmdargs = append(cmdargs, strconv.Itoa(unit.GetMachine()), cmd)
-		cmdargs = append(cmdargs, args...)
-		err := runCmd(true, stdout, stderr, cmdargs...)
-		fmt.Fprintln(stdout)
+		err := p.executeCommandViaSSH(stdout, stderr, unit.GetMachine(), cmd, args...)
 		if err != nil {
 			return err
 		}
@@ -358,8 +434,8 @@ func (p *JujuProvisioner) collectStatus() ([]provision.Unit, error) {
 				Name:       unitName,
 				AppName:    name,
 				Machine:    u.Machine,
-				InstanceId: machine.InstanceId,
-				Ip:         machine.IpAddress,
+				InstanceId: machine.InstanceID,
+				Ip:         machine.IPAddress,
 			}
 			typeRegexp := regexp.MustCompile(`^(local:)?(\w+)/(\w+)-\d+$`)
 			matchs := typeRegexp.FindStringSubmatch(service.Charm)
@@ -381,31 +457,33 @@ func (p *JujuProvisioner) heal(units []provision.Unit) {
 	for _, unit := range units {
 		err := coll.FindId(unit.Name).One(&inst)
 		if err != nil {
-			coll.Insert(instance{UnitName: unit.Name, InstanceId: unit.InstanceId})
-		} else if unit.InstanceId == inst.InstanceId {
+			coll.Insert(instance{UnitName: unit.Name, InstanceID: unit.InstanceId})
+		} else if unit.InstanceId == inst.InstanceID {
 			continue
 		} else {
 			format := "[juju] instance-id of unit %q changed from %q to %q. Healing."
-			log.Printf(format, unit.Name, inst.InstanceId, unit.InstanceId)
+			log.Printf(format, unit.Name, inst.InstanceID, unit.InstanceId)
 			if p.elbSupport() {
-				a := qApp{unit.AppName}
-				manager := p.LoadBalancer()
-				manager.Deregister(&a, provision.Unit{InstanceId: inst.InstanceId})
-				err := manager.Register(&a, provision.Unit{InstanceId: unit.InstanceId})
+				router, err := Router()
+				if err != nil {
+					continue
+				}
+				router.RemoveRoute(unit.AppName, inst.InstanceID)
+				err = router.AddRoute(unit.AppName, unit.InstanceId)
 				if err != nil {
 					format := "[juju] Could not register instance %q in the load balancer: %s."
 					log.Printf(format, unit.InstanceId, err)
 					continue
 				}
 			}
-			if inst.InstanceId != "pending" {
+			if inst.InstanceID != "pending" {
 				msg := queue.Message{
 					Action: app.RegenerateApprcAndStart,
 					Args:   []string{unit.AppName, unit.Name},
 				}
 				app.Enqueue(msg)
 			}
-			inst.InstanceId = unit.InstanceId
+			inst.InstanceID = unit.InstanceId
 			coll.UpdateId(unit.Name, inst)
 		}
 	}
@@ -422,26 +500,27 @@ func (p *JujuProvisioner) CollectStatus() ([]provision.Unit, error) {
 
 func (p *JujuProvisioner) Addr(app provision.App) (string, error) {
 	if p.elbSupport() {
-		return p.LoadBalancer().Addr(app)
+		router, err := Router()
+		if err != nil {
+			return "", err
+		}
+		addr, err := router.Addr(app.GetName())
+		if err != nil {
+			return "", fmt.Errorf("There is no ACTIVE Load Balancer named %s", app.GetName())
+		}
+		return addr, nil
 	}
-	units := app.ProvisionUnits()
+	units := app.ProvisionedUnits()
 	if len(units) < 1 {
 		return "", fmt.Errorf("App %q has no units.", app.GetName())
 	}
 	return units[0].GetIp(), nil
 }
 
-func (p *JujuProvisioner) LoadBalancer() *ELBManager {
-	if p.elbSupport() {
-		return &ELBManager{}
-	}
-	return nil
-}
-
 // instance represents a unit in the database.
 type instance struct {
 	UnitName   string `bson:"_id"`
-	InstanceId string
+	InstanceID string
 }
 
 type unit struct {
@@ -457,8 +536,8 @@ type service struct {
 
 type machine struct {
 	AgentState    string `yaml:"agent-state"`
-	IpAddress     string `yaml:"dns-name"`
-	InstanceId    string `yaml:"instance-id"`
+	IPAddress     string `yaml:"dns-name"`
+	InstanceID    string `yaml:"instance-id"`
 	InstanceState string `yaml:"instance-state"`
 }
 
@@ -467,15 +546,12 @@ type jujuOutput struct {
 	Machines map[int]machine
 }
 
-func runCmd(filter bool, stdout, stderr io.Writer, cmd ...string) error {
+func runCmd(filter bool, stdout, stderr io.Writer, args ...string) error {
 	if filter {
 		stdout = &Writer{stdout}
 		stderr = &Writer{stderr}
 	}
-	command := exec.Command("juju", cmd...)
-	command.Stdout = stdout
-	command.Stderr = stderr
-	return command.Run()
+	return executor().Execute("juju", args, nil, stdout, stderr)
 }
 
 func cmdError(output string, err error, cmd []string) error {
@@ -487,7 +563,7 @@ func execWithTimeout(timeout time.Duration, cmd string, args ...string) (output 
 	var buf safe.Buffer
 	ch := make(chan []byte, 1)
 	errCh := make(chan error, 1)
-	command := exec.Command(cmd, args...)
+	command := osexec.Command(cmd, args...)
 	command.Stdout = &Writer{&buf}
 	command.Stderr = &Writer{&buf}
 	if err = command.Start(); err != nil {

@@ -1,4 +1,4 @@
-// Copyright 2012 tsuru authors. All rights reserved.
+// Copyright 2013 tsuru authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -22,6 +22,7 @@ type File interface {
 	io.ReaderAt
 	io.Seeker
 	io.Writer
+	Fd() uintptr
 	Stat() (os.FileInfo, error)
 	WriteString(s string) (ret int, err error)
 	Truncate(size int64) error
@@ -57,6 +58,9 @@ type Fs interface {
 	// does not fail if the path does not exist (return nil).
 	RemoveAll(path string) error
 
+	// Rename renames a file.
+	Rename(oldname, newname string) error
+
 	// Stat returns a FileInfo describing the named file, or an error, if any
 	// happens.
 	Stat(name string) (os.FileInfo, error)
@@ -68,34 +72,38 @@ type Fs interface {
 // (http://golang.org/pkg/os/).
 type OsFs struct{}
 
-func (fs OsFs) Create(name string) (File, error) {
+func (OsFs) Create(name string) (File, error) {
 	return os.Create(name)
 }
 
-func (fs OsFs) Mkdir(name string, perm os.FileMode) error {
+func (OsFs) Mkdir(name string, perm os.FileMode) error {
 	return os.Mkdir(name, perm)
 }
 
-func (fs OsFs) MkdirAll(path string, perm os.FileMode) error {
+func (OsFs) MkdirAll(path string, perm os.FileMode) error {
 	return os.MkdirAll(path, perm)
 }
 
-func (fs OsFs) Open(name string) (File, error) {
+func (OsFs) Open(name string) (File, error) {
 	return os.Open(name)
 }
 
-func (fs OsFs) OpenFile(name string, flag int, perm os.FileMode) (File, error) {
+func (OsFs) OpenFile(name string, flag int, perm os.FileMode) (File, error) {
 	return os.OpenFile(name, flag, perm)
 }
 
-func (fs OsFs) Remove(name string) error {
+func (OsFs) Remove(name string) error {
 	return os.Remove(name)
 }
 
-func (fs OsFs) RemoveAll(path string) error {
+func (OsFs) RemoveAll(path string) error {
 	return os.RemoveAll(path)
 }
 
-func (fs OsFs) Stat(name string) (os.FileInfo, error) {
+func (OsFs) Rename(oldname, newname string) error {
+	return os.Rename(oldname, newname)
+}
+
+func (OsFs) Stat(name string) (os.FileInfo, error) {
 	return os.Stat(name)
 }

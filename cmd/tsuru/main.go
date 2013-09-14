@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	version = "0.7.5"
+	version = "0.8.4"
 	header  = "Supported-Tsuru"
 )
 
@@ -19,7 +19,7 @@ func buildManager(name string) *cmd.Manager {
 	m := cmd.BuildBaseManager(name, version, header)
 	m.Register(&tsuru.AppRun{})
 	m.Register(&tsuru.AppInfo{})
-	m.Register(&AppCreate{})
+	m.Register(AppCreate{})
 	m.Register(&AppRemove{})
 	m.Register(&UnitAdd{})
 	m.Register(&UnitRemove{})
@@ -43,6 +43,8 @@ func buildManager(name string) *cmd.Manager {
 	m.Register(tsuru.ServiceInstanceStatus{})
 	m.Register(&tsuru.ServiceBind{})
 	m.Register(&tsuru.ServiceUnbind{})
+	m.Register(platformList{})
+	m.Register(swap{})
 	return m
 }
 

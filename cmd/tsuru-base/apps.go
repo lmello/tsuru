@@ -29,12 +29,12 @@ If you don't provide the app name, tsuru will try to guess it.`,
 	}
 }
 
-func (c *AppInfo) Run(context *cmd.Context, client cmd.Doer) error {
+func (c *AppInfo) Run(context *cmd.Context, client *cmd.Client) error {
 	appName, err := c.Guess()
 	if err != nil {
 		return err
 	}
-	url, err := cmd.GetUrl(fmt.Sprintf("/apps/%s", appName))
+	url, err := cmd.GetURL(fmt.Sprintf("/apps/%s", appName))
 	if err != nil {
 		return err
 	}
@@ -67,10 +67,11 @@ type app struct {
 	Ip         string
 	CName      string
 	Name       string
-	Framework  string
+	Platform   string
 	Repository string
 	Teams      []string
 	Units      []unit
+	Ready      bool
 }
 
 func (a *app) Addr() string {
@@ -78,6 +79,13 @@ func (a *app) Addr() string {
 		return a.CName
 	}
 	return a.Ip
+}
+
+func (a *app) IsReady() string {
+	if a.Ready {
+		return "Yes"
+	}
+	return "No"
 }
 
 func (a *app) String() string {
@@ -91,10 +99,12 @@ Address: %s
 	units := cmd.NewTable()
 	units.Headers = cmd.Row([]string{"Unit", "State"})
 	for _, unit := range a.Units {
-		units.AddRow(cmd.Row([]string{unit.Name, unit.State}))
+		if unit.Name != "" {
+			units.AddRow(cmd.Row([]string{unit.Name, unit.State}))
+		}
 	}
-	args := []interface{}{a.Name, a.Repository, a.Framework, teams, a.Addr()}
-	if len(a.Units) > 0 {
+	args := []interface{}{a.Name, a.Repository, a.Platform, teams, a.Addr()}
+	if units.Rows() > 0 {
 		format += "Units:\n%s"
 		args = append(args, units)
 	}
@@ -126,13 +136,13 @@ If you don't provide the app name, tsuru will try to guess it.`,
 	}
 }
 
-func (c *AppGrant) Run(context *cmd.Context, client cmd.Doer) error {
+func (c *AppGrant) Run(context *cmd.Context, client *cmd.Client) error {
 	appName, err := c.Guess()
 	if err != nil {
 		return err
 	}
 	teamName := context.Args[0]
-	url, err := cmd.GetUrl(fmt.Sprintf("/apps/%s/%s", appName, teamName))
+	url, err := cmd.GetURL(fmt.Sprintf("/apps/%s/%s", appName, teamName))
 	if err != nil {
 		return err
 	}
@@ -163,13 +173,13 @@ If you don't provide the app name, tsuru will try to guess it.`,
 	}
 }
 
-func (c *AppRevoke) Run(context *cmd.Context, client cmd.Doer) error {
+func (c *AppRevoke) Run(context *cmd.Context, client *cmd.Client) error {
 	appName, err := c.Guess()
 	if err != nil {
 		return err
 	}
 	teamName := context.Args[0]
-	url, err := cmd.GetUrl(fmt.Sprintf("/apps/%s/%s", appName, teamName))
+	url, err := cmd.GetURL(fmt.Sprintf("/apps/%s/%s", appName, teamName))
 	if err != nil {
 		return err
 	}
@@ -187,8 +197,8 @@ func (c *AppRevoke) Run(context *cmd.Context, client cmd.Doer) error {
 
 type AppList struct{}
 
-func (c AppList) Run(context *cmd.Context, client cmd.Doer) error {
-	url, err := cmd.GetUrl("/apps")
+func (c AppList) Run(context *cmd.Context, client *cmd.Client) error {
+	url, err := cmd.GetURL("/apps")
 	if err != nil {
 		return err
 	}
@@ -218,16 +228,20 @@ func (c AppList) Show(result []byte, context *cmd.Context) error {
 		return err
 	}
 	table := cmd.NewTable()
-	table.Headers = cmd.Row([]string{"Application", "Units State Summary", "Address"})
+	table.Headers = cmd.Row([]string{"Application", "Units State Summary", "Address", "Ready?"})
 	for _, app := range apps {
-		var units_started int
+		var startedUnits int
+		var total int
 		for _, unit := range app.Units {
-			if unit.State == "started" {
-				units_started += 1
+			if unit.Name != "" {
+				total++
+				if unit.State == "started" {
+					startedUnits += 1
+				}
 			}
 		}
-		summary := fmt.Sprintf("%d of %d units in-service", units_started, len(app.Units))
-		table.AddRow(cmd.Row([]string{app.Name, summary, app.Addr()}))
+		summary := fmt.Sprintf("%d of %d units in-service", startedUnits, total)
+		table.AddRow(cmd.Row([]string{app.Name, summary, app.Addr(), app.IsReady()}))
 	}
 	table.Sort()
 	context.Stdout.Write(table.Bytes())
@@ -246,12 +260,12 @@ type AppRestart struct {
 	GuessingCommand
 }
 
-func (c *AppRestart) Run(context *cmd.Context, client cmd.Doer) error {
+func (c *AppRestart) Run(context *cmd.Context, client *cmd.Client) error {
 	appName, err := c.Guess()
 	if err != nil {
 		return err
 	}
-	url, err := cmd.GetUrl(fmt.Sprintf("/apps/%s/restart", appName))
+	url, err := cmd.GetURL(fmt.Sprintf("/apps/%s/restart", appName))
 	if err != nil {
 		return err
 	}
@@ -286,7 +300,7 @@ type SetCName struct {
 	GuessingCommand
 }
 
-func (c *SetCName) Run(context *cmd.Context, client cmd.Doer) error {
+func (c *SetCName) Run(context *cmd.Context, client *cmd.Client) error {
 	err := setCName(context.Args[0], c.GuessingCommand, client)
 	if err != nil {
 		return err
@@ -308,8 +322,8 @@ type UnsetCName struct {
 	GuessingCommand
 }
 
-func (c *UnsetCName) Run(context *cmd.Context, client cmd.Doer) error {
-	err := setCName("", c.GuessingCommand, client)
+func (c *UnsetCName) Run(context *cmd.Context, client *cmd.Client) error {
+	err := unsetCName(c.GuessingCommand, client)
 	if err != nil {
 		return err
 	}
@@ -326,12 +340,32 @@ func (c *UnsetCName) Info() *cmd.Info {
 	}
 }
 
-func setCName(v string, g GuessingCommand, client cmd.Doer) error {
+func unsetCName(g GuessingCommand, client *cmd.Client) error {
 	appName, err := g.Guess()
 	if err != nil {
 		return err
 	}
-	url, err := cmd.GetUrl(fmt.Sprintf("/apps/%s", appName))
+	url, err := cmd.GetURL(fmt.Sprintf("/apps/%s/cname", appName))
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return err
+	}
+	_, err = client.Do(request)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func setCName(v string, g GuessingCommand, client *cmd.Client) error {
+	appName, err := g.Guess()
+	if err != nil {
+		return err
+	}
+	url, err := cmd.GetURL(fmt.Sprintf("/apps/%s/cname", appName))
 	if err != nil {
 		return err
 	}

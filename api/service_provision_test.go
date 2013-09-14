@@ -2,10 +2,11 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package api
 
 import (
 	"bytes"
+	"code.google.com/p/go.crypto/bcrypt"
 	"encoding/json"
 	"fmt"
 	"github.com/globocom/config"
@@ -13,6 +14,7 @@ import (
 	"github.com/globocom/tsuru/db"
 	"github.com/globocom/tsuru/errors"
 	"github.com/globocom/tsuru/service"
+	"github.com/globocom/tsuru/testing"
 	"io/ioutil"
 	"labix.org/v2/mgo/bson"
 	"launchpad.net/gocheck"
@@ -34,6 +36,7 @@ func (s *ProvisionSuite) SetUpSuite(c *gocheck.C) {
 	var err error
 	config.Set("database:url", "127.0.0.1:27017")
 	config.Set("database:name", "tsuru_api_provision_test")
+	config.Set("auth:hash-cost", bcrypt.MinCost)
 	s.conn, err = db.Conn()
 	c.Assert(err, gocheck.IsNil)
 	s.createUserAndTeam(c)
@@ -75,7 +78,7 @@ func (s *ProvisionSuite) TestServicesHandlerShoudGetAllServicesFromUsersTeam(c *
 	si.Create()
 	defer service.DeleteInstance(&si)
 	recorder, request := s.makeRequestToServicesHandler(c)
-	err := ServicesHandler(recorder, request, s.token)
+	err := serviceList(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	b, err := ioutil.ReadAll(recorder.Body)
 	c.Assert(err, gocheck.IsNil)
@@ -85,6 +88,8 @@ func (s *ProvisionSuite) TestServicesHandlerShoudGetAllServicesFromUsersTeam(c *
 		{Service: "mongodb", Instances: []string{"my_nosql"}},
 	}
 	c.Assert(services, gocheck.DeepEquals, expected)
+	action := testing.Action{Action: "list-services", User: s.user.Email}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func makeRequestToCreateHandler(c *gocheck.C) (*httptest.ResponseRecorder, *http.Request) {
@@ -100,20 +105,30 @@ endpoint:
 	return recorder, request
 }
 
-func (s *ProvisionSuite) TestCreateHandlerSavesNameFromManifestId(c *gocheck.C) {
+func (s *ProvisionSuite) TestCreateHandlerSavesNameFromManifestID(c *gocheck.C) {
 	recorder, request := makeRequestToCreateHandler(c)
-	err := CreateHandler(recorder, request, s.token)
+	err := serviceCreate(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	query := bson.M{"_id": "some_service"}
 	var rService service.Service
 	err = s.conn.Services().Find(query).One(&rService)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(rService.Name, gocheck.Equals, "some_service")
+	endpoints := map[string]string{
+		"production": "someservice.com",
+		"test":       "test.someservice.com",
+	}
+	action := testing.Action{
+		Action: "create-service",
+		User:   s.user.Email,
+		Extra:  []interface{}{"some_service", endpoints},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *ProvisionSuite) TestCreateHandlerSavesEndpointServiceProperty(c *gocheck.C) {
 	recorder, request := makeRequestToCreateHandler(c)
-	err := CreateHandler(recorder, request, s.token)
+	err := serviceCreate(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	query := bson.M{"_id": "some_service"}
 	var rService service.Service
@@ -132,7 +147,7 @@ func (s *ProvisionSuite) TestCreateHandlerWithContentOfRealYaml(c *gocheck.C) {
 	c.Assert(err, gocheck.IsNil)
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
-	err = CreateHandler(recorder, request, s.token)
+	err = serviceCreate(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	query := bson.M{"_id": "mysqlapi"}
 	var rService service.Service
@@ -144,17 +159,17 @@ func (s *ProvisionSuite) TestCreateHandlerWithContentOfRealYaml(c *gocheck.C) {
 
 func (s *ProvisionSuite) TestCreateHandlerShouldReturnErrorWhenNameExists(c *gocheck.C) {
 	recorder, request := makeRequestToCreateHandler(c)
-	err := CreateHandler(recorder, request, s.token)
+	err := serviceCreate(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	recorder, request = makeRequestToCreateHandler(c)
-	err = CreateHandler(recorder, request, s.token)
+	err = serviceCreate(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
 	c.Assert(err, gocheck.ErrorMatches, "^Service with name some_service already exists.$")
 }
 
 func (s *ProvisionSuite) TestCreateHandlerSavesOwnerTeamsFromUserWhoCreated(c *gocheck.C) {
 	recorder, request := makeRequestToCreateHandler(c)
-	err := CreateHandler(recorder, request, s.token)
+	err := serviceCreate(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(recorder.Body.String(), gocheck.Equals, "success")
 	c.Assert(recorder.Code, gocheck.Equals, http.StatusOK)
@@ -175,9 +190,9 @@ func (s *ProvisionSuite) TestCreateHandlerReturnsForbiddenIfTheUserIsNotMemberOf
 	c.Assert(err, gocheck.IsNil)
 	defer s.conn.Tokens().Remove(bson.M{"token": token.Token})
 	recorder, request := makeRequestToCreateHandler(c)
-	err = CreateHandler(recorder, request, token)
+	err = serviceCreate(recorder, request, token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
 	c.Assert(e, gocheck.ErrorMatches, "^In order to create a service, you should be member of at least one team$")
@@ -192,16 +207,20 @@ func (s *ProvisionSuite) TestCreateHandlerReturnsBadRequestIfTheServiceDoesNotHa
 	c.Assert(err, gocheck.IsNil)
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
-	err = CreateHandler(recorder, request, s.token)
+	err = serviceCreate(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusBadRequest)
 	c.Assert(e.Message, gocheck.Equals, "You must provide a production endpoint in the manifest file.")
 }
 
 func (s *ProvisionSuite) TestUpdateHandlerShouldUpdateTheServiceWithDataFromManifest(c *gocheck.C) {
-	service := service.Service{Name: "mysqlapi", Endpoint: map[string]string{"production": "sqlapi.com"}, OwnerTeams: []string{s.team.Name}}
+	service := service.Service{
+		Name:       "mysqlapi",
+		Endpoint:   map[string]string{"production": "sqlapi.com"},
+		OwnerTeams: []string{s.team.Name},
+	}
 	err := service.Create()
 	c.Assert(err, gocheck.IsNil)
 	defer s.conn.Services().Remove(bson.M{"_id": service.Name})
@@ -211,12 +230,19 @@ func (s *ProvisionSuite) TestUpdateHandlerShouldUpdateTheServiceWithDataFromMani
 	request, err := http.NewRequest("PUT", "/services", bytes.NewBuffer(manifest))
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = UpdateHandler(recorder, request, s.token)
+	err = serviceUpdate(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(recorder.Code, gocheck.Equals, http.StatusNoContent)
 	err = s.conn.Services().Find(bson.M{"_id": service.Name}).One(&service)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(service.Endpoint["production"], gocheck.Equals, "mysqlapi.com")
+	endpoints := map[string]string{"production": "mysqlapi.com", "test": "localhost:8000"}
+	action := testing.Action{
+		Action: "update-service",
+		User:   s.user.Email,
+		Extra:  []interface{}{service.Name, endpoints},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *ProvisionSuite) TestUpdateHandlerReturns404WhenTheServiceDoesNotExist(c *gocheck.C) {
@@ -227,9 +253,9 @@ func (s *ProvisionSuite) TestUpdateHandlerReturns404WhenTheServiceDoesNotExist(c
 	request, err := http.NewRequest("PUT", "/services", bytes.NewBuffer(manifest))
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = UpdateHandler(recorder, request, s.token)
+	err = serviceUpdate(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 	c.Assert(e, gocheck.ErrorMatches, "^Service not found$")
@@ -247,9 +273,9 @@ func (s *ProvisionSuite) TestUpdateHandlerReturns404WhenTheServicesIsDeleted(c *
 	request, err := http.NewRequest("PUT", "/services", bytes.NewBuffer(manifest))
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = UpdateHandler(recorder, request, s.token)
+	err = serviceUpdate(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 	c.Assert(e, gocheck.ErrorMatches, "^Service not found$")
@@ -266,9 +292,9 @@ func (s *ProvisionSuite) TestUpdateHandlerReturns403WhenTheUserIsNotOwnerOfTheTe
 	request, err := http.NewRequest("PUT", "/services", bytes.NewBuffer(manifest))
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = UpdateHandler(recorder, request, s.token)
+	err = serviceUpdate(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
 	c.Assert(e, gocheck.ErrorMatches, "^This user does not have access to this service$")
@@ -281,22 +307,28 @@ func (s *ProvisionSuite) TestDeleteHandler(c *gocheck.C) {
 	request, err := http.NewRequest("DELETE", fmt.Sprintf("/services/%s?:name=%s", se.Name, se.Name), nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = DeleteHandler(recorder, request, s.token)
+	err = serviceDelete(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(recorder.Code, gocheck.Equals, http.StatusNoContent)
-	query := bson.M{"_id": "Mysql"}
+	query := bson.M{"_id": se.Name}
 	err = s.conn.Services().Find(query).One(&se)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(se.Status, gocheck.Equals, "deleted")
+	action := testing.Action{
+		Action: "delete-service",
+		User:   s.user.Email,
+		Extra:  []interface{}{se.Name},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *ProvisionSuite) TestDeleteHandlerReturns404WhenTheServiceDoesNotExist(c *gocheck.C) {
 	request, err := http.NewRequest("DELETE", fmt.Sprintf("/services/%s?:name=%s", "mongodb", "mongodb"), nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = DeleteHandler(recorder, request, s.token)
+	err = serviceDelete(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 	c.Assert(e, gocheck.ErrorMatches, "^Service not found$")
@@ -310,9 +342,9 @@ func (s *ProvisionSuite) TestDeleteHandlerReturns404WhenTheServicesIsDeleted(c *
 	request, err := http.NewRequest("DELETE", fmt.Sprintf("/services/%s?:name=%s", se.Name, se.Name), nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = DeleteHandler(recorder, request, s.token)
+	err = serviceDelete(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 	c.Assert(e, gocheck.ErrorMatches, "^Service not found$")
@@ -325,9 +357,9 @@ func (s *ProvisionSuite) TestDeleteHandlerReturns403WhenTheUserIsNotOwnerOfTheTe
 	request, err := http.NewRequest("DELETE", fmt.Sprintf("/services/%s?:name=%s", se.Name, se.Name), nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = DeleteHandler(recorder, request, s.token)
+	err = serviceDelete(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
 	c.Assert(e, gocheck.ErrorMatches, "^This user does not have access to this service$")
@@ -345,9 +377,9 @@ func (s *ProvisionSuite) TestDeleteHandlerReturns403WhenTheServiceHasInstance(c 
 	request, err := http.NewRequest("DELETE", fmt.Sprintf("/services/%s?:name=%s", se.Name, se.Name), nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = DeleteHandler(recorder, request, s.token)
+	err = serviceDelete(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
 	c.Assert(e, gocheck.ErrorMatches, "^This service cannot be removed because it has instances.\nPlease remove these instances before removing the service.$")
@@ -365,11 +397,17 @@ func (s *ProvisionSuite) TestGrantServiceAccessToTeam(c *gocheck.C) {
 	request, err := http.NewRequest("PUT", url, nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = GrantServiceAccessToTeamHandler(recorder, request, s.token)
+	err = grantServiceAccess(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	err = se.Get()
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(*s.team, HasAccessTo, se)
+	action := testing.Action{
+		Action: "grant-service-access",
+		User:   s.user.Email,
+		Extra:  []interface{}{"service=" + se.Name, "team=" + t.Name},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *ProvisionSuite) TestGrantAccesToTeamReturnNotFoundIfTheServiceDoesNotExist(c *gocheck.C) {
@@ -377,9 +415,9 @@ func (s *ProvisionSuite) TestGrantAccesToTeamReturnNotFoundIfTheServiceDoesNotEx
 	request, err := http.NewRequest("PUT", url, nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = GrantServiceAccessToTeamHandler(recorder, request, s.token)
+	err = grantServiceAccess(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 	c.Assert(e, gocheck.ErrorMatches, "^Service not found$")
@@ -394,9 +432,9 @@ func (s *ProvisionSuite) TestGrantServiceAccessToTeamReturnForbiddenIfTheGivenUs
 	request, err := http.NewRequest("PUT", url, nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = GrantServiceAccessToTeamHandler(recorder, request, s.token)
+	err = grantServiceAccess(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
 	c.Assert(e, gocheck.ErrorMatches, "^This user does not have access to this service$")
@@ -411,9 +449,9 @@ func (s *ProvisionSuite) TestGrantServiceAccessToTeamReturnNotFoundIfTheTeamDoes
 	request, err := http.NewRequest("PUT", url, nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = GrantServiceAccessToTeamHandler(recorder, request, s.token)
+	err = grantServiceAccess(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 	c.Assert(e, gocheck.ErrorMatches, "^Team not found$")
@@ -428,9 +466,9 @@ func (s *ProvisionSuite) TestGrantServiceAccessToTeamReturnConflictIfTheTeamAlre
 	request, err := http.NewRequest("PUT", url, nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = GrantServiceAccessToTeamHandler(recorder, request, s.token)
+	err = grantServiceAccess(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusConflict)
 }
@@ -445,11 +483,17 @@ func (s *ProvisionSuite) TestRevokeServiceAccessFromTeamRemovesTeamFromService(c
 	request, err := http.NewRequest("DELETE", url, nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RevokeServiceAccessFromTeamHandler(recorder, request, s.token)
+	err = revokeServiceAccess(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	err = se.Get()
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(*s.team, gocheck.Not(HasAccessTo), se)
+	action := testing.Action{
+		Action: "revoke-service-access",
+		User:   s.user.Email,
+		Extra:  []interface{}{"service=" + se.Name, "team=" + s.team.Name},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *ProvisionSuite) TestRevokeServiceAccessFromTeamReturnsNotFoundIfTheServiceDoesNotExist(c *gocheck.C) {
@@ -457,9 +501,9 @@ func (s *ProvisionSuite) TestRevokeServiceAccessFromTeamReturnsNotFoundIfTheServ
 	request, err := http.NewRequest("DELETE", url, nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RevokeServiceAccessFromTeamHandler(recorder, request, s.token)
+	err = revokeServiceAccess(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 	c.Assert(e, gocheck.ErrorMatches, "^Service not found$")
@@ -475,9 +519,9 @@ func (s *ProvisionSuite) TestRevokeAccesFromTeamReturnsForbiddenIfTheGivenUserDo
 	request, err := http.NewRequest("DELETE", url, nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RevokeServiceAccessFromTeamHandler(recorder, request, s.token)
+	err = revokeServiceAccess(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
 	c.Assert(e, gocheck.ErrorMatches, "^This user does not have access to this service$")
@@ -492,9 +536,9 @@ func (s *ProvisionSuite) TestRevokeServiceAccessFromTeamReturnsNotFoundIfTheTeam
 	request, err := http.NewRequest("DELETE", url, nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RevokeServiceAccessFromTeamHandler(recorder, request, s.token)
+	err = revokeServiceAccess(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 	c.Assert(e, gocheck.ErrorMatches, "^Team not found$")
@@ -509,9 +553,9 @@ func (s *ProvisionSuite) TestRevokeServiceAccessFromTeamReturnsForbiddenIfTheTea
 	request, err := http.NewRequest("DELETE", url, nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RevokeServiceAccessFromTeamHandler(recorder, request, s.token)
+	err = revokeServiceAccess(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
 	c.Assert(e, gocheck.ErrorMatches, "^You can not revoke the access from this team, because it is the unique team with access to this service, and a service can not be orphaned$")
@@ -529,9 +573,9 @@ func (s *ProvisionSuite) TestRevokeServiceAccessFromTeamReturnNotFoundIfTheTeamD
 	request, err := http.NewRequest("DELETE", url, nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = RevokeServiceAccessFromTeamHandler(recorder, request, s.token)
+	err = revokeServiceAccess(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 }
@@ -541,9 +585,9 @@ func (s *ProvisionSuite) TestAddDocHandlerReturns404WhenTheServiceDoesNotExist(c
 	request, err := http.NewRequest("PUT", fmt.Sprintf("/services/%s/doc?:name=%s", "mongodb", "mongodb"), b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = AddDocHandler(recorder, request, s.token)
+	err = serviceAddDoc(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 	c.Assert(e, gocheck.ErrorMatches, "^Service not found$")
@@ -557,13 +601,19 @@ func (s *ProvisionSuite) TestAddDocHandler(c *gocheck.C) {
 	request, err := http.NewRequest("PUT", fmt.Sprintf("/services/%s/doc?:name=%s", se.Name, se.Name), b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = AddDocHandler(recorder, request, s.token)
+	err = serviceAddDoc(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	query := bson.M{"_id": "some_service"}
 	var serv service.Service
 	err = s.conn.Services().Find(query).One(&serv)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(serv.Doc, gocheck.Equals, "doc")
+	action := testing.Action{
+		Action: "service-add-doc",
+		User:   s.user.Email,
+		Extra:  []interface{}{"some_service", "doc"},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *ProvisionSuite) TestAddDocHandlerReturns403WhenTheUserDoesNotHaveAccessToTheService(c *gocheck.C) {
@@ -574,51 +624,12 @@ func (s *ProvisionSuite) TestAddDocHandlerReturns403WhenTheUserDoesNotHaveAccess
 	request, err := http.NewRequest("PUT", fmt.Sprintf("/services/%s/doc?:name=%s", se.Name, se.Name), b)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = AddDocHandler(recorder, request, s.token)
+	err = serviceAddDoc(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
 	c.Assert(e, gocheck.ErrorMatches, "^This user does not have access to this service$")
-}
-
-func (s *ProvisionSuite) TestGetDocHandler(c *gocheck.C) {
-	se := service.Service{Name: "some_service", Doc: "some doc", OwnerTeams: []string{s.team.Name}}
-	se.Create()
-	defer s.conn.Services().Remove(bson.M{"_id": se.Name})
-	request, err := http.NewRequest("GET", fmt.Sprintf("/services/%s/doc?:name=%s", se.Name, se.Name), nil)
-	c.Assert(err, gocheck.IsNil)
-	recorder := httptest.NewRecorder()
-	err = GetDocHandler(recorder, request, s.token)
-	c.Assert(err, gocheck.IsNil)
-	c.Assert(recorder.Body.String(), gocheck.Equals, "some doc")
-}
-
-func (s *ProvisionSuite) TestGetDocHandlerReturns403WhenTheUserDoesNotHaveAccessToTheService(c *gocheck.C) {
-	se := service.Service{Name: "Mysql"}
-	se.Create()
-	defer s.conn.Services().Remove(bson.M{"_id": se.Name})
-	request, err := http.NewRequest("GET", fmt.Sprintf("/services/%s/doc?:name=%s", se.Name, se.Name), nil)
-	c.Assert(err, gocheck.IsNil)
-	recorder := httptest.NewRecorder()
-	err = GetDocHandler(recorder, request, s.token)
-	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
-	c.Assert(ok, gocheck.Equals, true)
-	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
-	c.Assert(e, gocheck.ErrorMatches, "^This user does not have access to this service$")
-}
-
-func (s *ProvisionSuite) TestGetDocHandlerReturns404WhenTheServiceDoesNotExist(c *gocheck.C) {
-	request, err := http.NewRequest("GET", fmt.Sprintf("/services/%s/doc?:name=%s", "mongodb", "mongodb"), nil)
-	c.Assert(err, gocheck.IsNil)
-	recorder := httptest.NewRecorder()
-	err = GetDocHandler(recorder, request, s.token)
-	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
-	c.Assert(ok, gocheck.Equals, true)
-	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
-	c.Assert(e, gocheck.ErrorMatches, "^Service not found$")
 }
 
 func (s *ProvisionSuite) TestgetServiceByOwner(c *gocheck.C) {

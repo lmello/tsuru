@@ -23,6 +23,12 @@ tsuru contains three clients: ``tsuru``, ``tsuru-admin`` and ``crane``.
 This document describes how you can install those clients, using pre-compiled
 binaries or building them from source.
 
+`Using homebrew (Mac OS X only)`_
+
+`Pre-built binaries (Linux and Mac OS X)`_
+
+`Build from source (Linux and Mac OS X)`_
+
 Using homebrew (Mac OS X only)
 ==============================
 
@@ -57,6 +63,9 @@ Whenever a new version of any of tsuru's clients is out, you can just run:
 
 For more details on taps, check `homebrew documentation
 <https://github.com/mxcl/homebrew/wiki>`_.
+
+**NOTE:** Tsuru requires Go 1.1 or higher. Make sure you have the last version
+of Go installed in your system.
 
 Pre-built binaries (Linux and Mac OS X)
 =======================================
@@ -95,8 +104,8 @@ and put the binary somewhere in your PATH:
 * tsuru-admin: https://s3.amazonaws.com/tsuru/dist-cmd/tsuru-admin-linux-amd64.tar.gz
 * crane: https://s3.amazonaws.com/tsuru/dist-cmd/crane-linux-amd64.tar.gz
 
-Build from source (any platform supported by Go)
-================================================
+Build from source (Linux and Mac OS X)
+======================================
 
 `Tsuru's source <https://github.com/globocom/tsuru>`_ is written in `Go
 <http://golang.org>`_, so before installing tsuru from source, please make sure

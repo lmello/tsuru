@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package collector
 
 import (
 	"fmt"
@@ -37,8 +37,8 @@ func getFakeApps(conn *db.Storage) ([]app.App, []string) {
 		name := fmt.Sprintf("app%d", i+1)
 		names[i] = name
 		apps[i] = app.App{
-			Name:      name,
-			Framework: "python",
+			Name:     name,
+			Platform: "python",
 		}
 		err := conn.Apps().Insert(apps[i])
 		if err != nil {

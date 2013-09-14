@@ -25,6 +25,7 @@ The currently available commands are (grouped by subject):
 	login             authenticates the user with tsuru server
 	logout            finishes the session with tsuru server
 	change-password   changes your password
+	reset-password    redefines your password
 	key-add           adds a public key to tsuru deploy server
 	key-remove        removes a public key from tsuru deploy server
 
@@ -34,6 +35,7 @@ The currently available commands are (grouped by subject):
 	team-user-add     adds a user to a team
 	team-user-remove  removes a user from a team
 
+	platform-list     list available platforms
 	app-create        creates an app
 	app-remove        removes an app
 	app-list          lists apps that the user has access (see app-grant and team-user-add)
@@ -47,6 +49,7 @@ The currently available commands are (grouped by subject):
 	restart           restarts the app's application server
 	set-cname         defines a cname for an app
 	unset-cname       unsets the cname from an app
+	swap              swaps the router between two apps
 
 	env-get           display environment variables for an app
 	env-set           set environment variable(s) to an app
@@ -91,7 +94,7 @@ Managing remote tsuru server endpoints
 Usage:
 
 	% tsuru target
-	% tsuru target-add <label> <address> [--set-current]
+	% tsuru target-add <label> <address> [--set-current|-s]
 	% tsuru target-set <label>
 	% tsuru target-remove <label>
 
@@ -164,6 +167,24 @@ Usage:
 
 change-password will change the password of the logged in user. It will ask for
 the current password, the new and the confirmation.
+
+
+Redefine user's password
+
+Usage:
+
+	% tsuru reset-password <email> [--token|-k <token>]
+
+reset-password will redefine the user password. This process is composed by two steps:
+
+	1. Token generation
+	2. Password generation
+
+In order to generate the token, users should run this command without the --token flag.
+The token will be mailed to the user.
+
+With the token in hand, the user can finally reset the password using the --token flag.
+The new password will also be mailed to the user.`,
 
 
 Add SSH public key to tsuru's git server
@@ -253,18 +274,25 @@ A team can never have 0 users. If you are the last member of a team, you can't
 remove yourself from it.
 
 
+Display the list of available platforms
+
+Usage:
+
+	% tsuru platform-list
+
+platform-list lists the available platforms. All platforms displayed in this
+list may be used to create new apps (see app-create).
+
+
 Create an app
 
 Usage:
 
-	% tsuru app-create <app-name> <platform> [--units 1]
+	% tsuru app-create <app-name> <platform>
 
 app-create will create a new app using the given name and platform. For tsuru,
-a platform is a Juju charm. To check the available platforms/charms, check this
-URL: https://github.com/globocom/charms/tree/master/precise.
-
-The --units flag is optional, it indicates how many units will be added to the
-app when creating it. The default value is 1.
+a platform is a Juju charm. To check the available platforms, use the command
+"platform-list".
 
 In order to create an app, you need to be member of at least one team. All
 teams that you are member (see "tsuru team-list") will be able to access the
@@ -362,7 +390,7 @@ See app's logs
 
 Usage:
 
-	% tsuru log [--app appname] [--lines numberOfLines] [--source source]
+	% tsuru log [--app|-a appname] [--lines|-l numberOfLines] [--source|-s source] [--follow|-f]
 
 Log will show log entries for an app. These logs are not related to the code of
 the app itself, but to actions of the app in tsuru server (deployments,
@@ -384,7 +412,7 @@ commands is the root of the app. For example, in a Django app, "tsuru run" may
 show the following output:
 
 	% tsuru run polls ls
-	app.conf
+	app.yaml
 	brogui
 	deploy
 	foo
@@ -550,6 +578,14 @@ service-list will retrieve and display a list of services that the user has
 access to. If the user has any instance of services, it will be displayed by
 this command too.
 
+
+Swap the routing between two apps
+
+Usage:
+
+	% tsuru swap <app1> <app2>
+
+swap will swap the routing between two apps enabling blue/green deploy, zero downtime and make the rollbacks easier.
 
 Create a new service instance
 

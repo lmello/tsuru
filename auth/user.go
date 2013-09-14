@@ -5,16 +5,21 @@
 package auth
 
 import (
+	"bytes"
 	"code.google.com/p/go.crypto/bcrypt"
-	"code.google.com/p/go.crypto/pbkdf2"
-	"crypto/sha512"
 	stderrors "errors"
 	"fmt"
 	"github.com/globocom/config"
+	"github.com/globocom/go-gandalfclient"
 	"github.com/globocom/tsuru/db"
 	"github.com/globocom/tsuru/errors"
+	"github.com/globocom/tsuru/log"
+	"github.com/globocom/tsuru/repository"
 	"github.com/globocom/tsuru/validation"
 	"labix.org/v2/mgo/bson"
+	"math/rand"
+	"net"
+	"net/smtp"
 	"time"
 )
 
@@ -26,24 +31,18 @@ const (
 	passwordMaxLen    = 50
 )
 
-var salt, tokenKey string
+var ErrUserNotFound = stderrors.New("User not found")
+
 var tokenExpire time.Duration
 var cost int
 
 func loadConfig() error {
-	if salt == "" && tokenKey == "" {
+	if cost == 0 && tokenExpire == 0 {
 		var err error
-		if salt, err = config.GetString("auth:salt"); err != nil {
-			return stderrors.New(`Setting "auth:salt" is undefined.`)
-		}
-		if iface, err := config.Get("auth:token-expire-days"); err == nil {
-			day := int64(iface.(int))
-			tokenExpire = time.Duration(day * 24 * int64(time.Hour))
+		if days, err := config.GetInt("auth:token-expire-days"); err == nil {
+			tokenExpire = time.Duration(int64(days) * 24 * int64(time.Hour))
 		} else {
 			tokenExpire = defaultExpiration
-		}
-		if tokenKey, err = config.GetString("auth:token-key"); err != nil {
-			return stderrors.New(`Setting "auth:token-key" is undefined.`)
 		}
 		if cost, err = config.GetInt("auth:hash-cost"); err != nil {
 			return stderrors.New(`Setting "auth:hash-cost" is undefined.`)
@@ -53,19 +52,6 @@ func loadConfig() error {
 		}
 	}
 	return nil
-}
-
-// hashPassword hashes a password using the old method (PBKDF2 + SHA512).
-//
-// BUG(fss): this function is deprecated, it's here for the migration phase
-// (whenever a user login with the old hash, the new hash will be generated).
-func hashPassword(password string) string {
-	err := loadConfig()
-	if err != nil {
-		panic(err)
-	}
-	salt := []byte(salt)
-	return fmt.Sprintf("%x", pbkdf2.Key([]byte(password), salt, 4096, len(salt)*8, sha512.New))
 }
 
 type Key struct {
@@ -91,7 +77,7 @@ func GetUserByEmail(email string) (*User, error) {
 	defer conn.Close()
 	err = conn.Users().Find(bson.M{"email": email}).One(&u)
 	if err != nil {
-		return nil, stderrors.New("User not found")
+		return nil, ErrUserNotFound
 	}
 	return &u, nil
 }
@@ -125,19 +111,7 @@ func (u *User) CheckPassword(password string) error {
 	if !validation.ValidateLength(password, passwordMinLen, passwordMaxLen) {
 		return &errors.ValidationError{Message: passwordError}
 	}
-	// BUG(fss): this is temporary code, for a migration phase in the
-	// hashing algorithm. In the future we should just use
-	// bcrypt.CompareHashAndPassword, and drop the old hash checking and
-	// update stuff.
 	if bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(password)) == nil {
-		return nil
-	}
-	hashedPassword := hashPassword(password)
-	if u.Password == hashedPassword {
-		if bcryptPassword, err := bcrypt.GenerateFromPassword([]byte(password), cost); err == nil {
-			u.Password = string(bcryptPassword)
-			u.Update()
-		}
 		return nil
 	}
 	return AuthenticationFailure{}
@@ -160,18 +134,23 @@ func (u *User) CreateToken(password string) (*Token, error) {
 		return nil, err
 	}
 	err = conn.Tokens().Insert(t)
+	go removeOldTokens(u.Email)
 	return t, err
 }
 
 // Teams returns a slice containing all teams that the user is member of.
-func (u *User) Teams() (teams []Team, err error) {
+func (u *User) Teams() ([]Team, error) {
 	conn, err := db.Conn()
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
+	var teams []Team
 	err = conn.Teams().Find(bson.M{"users": u.Email}).All(&teams)
-	return
+	if err != nil {
+		return nil, err
+	}
+	return teams, nil
 }
 
 func (u *User) FindKey(key Key) (Key, int) {
@@ -260,8 +239,111 @@ func (u *User) AllowedAppsByTeam(team string) ([]string, error) {
 	return appNames, nil
 }
 
+// StartPasswordReset starts the password reset process, creating a new token
+// and mailing it to the user.
+//
+// The token should then be used to finish the process, through the
+// ResetPassword function.
+func (u *User) StartPasswordReset() error {
+	t, err := createPasswordToken(u)
+	if err != nil {
+		return err
+	}
+	go u.sendResetPassword(t)
+	return nil
+}
+
+func (u *User) sendResetPassword(t *passwordToken) {
+	var body bytes.Buffer
+	err := resetEmailData.Execute(&body, t)
+	if err != nil {
+		log.Printf("Failed to send password token to user %q: %s", u.Email, err)
+		return
+	}
+	err = sendEmail(u.Email, body.Bytes())
+	if err != nil {
+		log.Printf("Failed to send password token for user %q: %s", u.Email, err)
+	}
+}
+
+// ResetPassword actually resets the password of the user. It needs the token
+// string. The new password will be a random string, that will be then sent to
+// the user email.
+func (u *User) ResetPassword(token string) error {
+	if token == "" {
+		return ErrInvalidToken
+	}
+	conn, err := db.Conn()
+	if err != nil {
+		return err
+	}
+	t, err := getPasswordToken(token)
+	if err != nil {
+		return err
+	}
+	if t.UserEmail != u.Email {
+		return ErrInvalidToken
+	}
+	password := generatePassword(12)
+	u.Password = password
+	u.HashPassword()
+	go u.sendNewPassword(password)
+	t.Used = true
+	conn.PasswordTokens().UpdateId(t.Token, t)
+	return u.Update()
+}
+
+func (u *User) sendNewPassword(password string) {
+	m := map[string]string{
+		"password": password,
+		"email":    u.Email,
+	}
+	var body bytes.Buffer
+	err := passwordResetConfirm.Execute(&body, m)
+	if err != nil {
+		log.Printf("Failed to send new password to user %q: %s", u.Email, err)
+		return
+	}
+	err = sendEmail(u.Email, body.Bytes())
+	if err != nil {
+		log.Printf("Failed to send new password to user %q: %s", u.Email, err)
+	}
+}
+
+func (u *User) ListKeys() (map[string]string, error) {
+	gURL := repository.ServerURL()
+	c := gandalf.Client{Endpoint: gURL}
+	return c.ListKeys(u.Email)
+}
+
 type AuthenticationFailure struct{}
 
 func (AuthenticationFailure) Error() string {
 	return "Authentication failed, wrong password."
+}
+
+func generatePassword(length int) string {
+	password := make([]byte, length)
+	for i := range password {
+		password[i] = passwordChars[rand.Int()%len(passwordChars)]
+	}
+	return string(password)
+}
+
+func sendEmail(email string, data []byte) error {
+	addr, err := config.GetString("smtp:server")
+	if err != nil {
+		return stderrors.New(`Setting "smtp:server" is not defined`)
+	}
+	user, err := config.GetString("smtp:user")
+	if err != nil {
+		return stderrors.New(`Setting "smtp:user" is not defined`)
+	}
+	password, err := config.GetString("smtp:password")
+	if err != nil {
+		return stderrors.New(`Setting "smtp:password" is not defined`)
+	}
+	host, _, _ := net.SplitHostPort(addr)
+	auth := smtp.PlainAuth("", user, password, host)
+	return smtp.SendMail(addr, auth, user, []string{email}, data)
 }

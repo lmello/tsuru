@@ -11,13 +11,13 @@ Overview
 
 This document is a hands-on guide to deploying a simple Python application in
 Tsuru. The example application will be a very simple Django project associated
-to a MySQL service.
+to a MySQL service. It's applicable to any WSGI application.
 
 Creating the app within tsuru
 =============================
 
 To create an app, you use `app-create
-<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#Create_an_app>`_
+<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#hdr-Create_an_app>`_
 command:
 
 .. highlight:: bash
@@ -36,8 +36,12 @@ very creative, let's call it "blog":
 
     $ tsuru app-create blog python
 
+To list all available platforms, use `platform-list
+<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#hdr-Display_the_list_of_available_platforms>`_
+command.
+
 You can see all your applications using `app-list
-<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#List_apps_that_you_have_access_to>`_
+<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#hdr-List_apps_that_you_have_access_to>`_
 command:
 
 .. highlight:: bash
@@ -45,31 +49,30 @@ command:
 ::
 
     $ tsuru app-list
-    +-------------+-------------------------+----+
-    | Application | Units State Summary     | IP |
-    +-------------+-------------------------+----+
-    | blog        | 0 of 1 units in-service |    |
-    +-------------+-------------------------+----+
+    +-------------+-------------------------+---------+--------+
+    | Application | Units State Summary     | Address | Ready? |
+    +-------------+-------------------------+---------+--------+
+    | blog        | 0 of 0 units in-service |         | No     |
+    +-------------+-------------------------+---------+--------+
 
-Once your app is ready, it will be displayed as "started" (along with its IP
-address or public host):
+Once your app is ready, you will be able to deploy your code, e.g.:
 
 .. highlight:: bash
 
 ::
 
     $ tsuru app-list
-    +-------------+-------------------------+-------------+
-    | Application | Units State Summary     | IP          |
-    +-------------+-------------------------+-------------+
-    | blog        | 1 of 1 units in-service | 10.10.10.10 |
-    +-------------+-------------------------+-------------+
+    +-------------+-------------------------+-------------+--------+
+    | Application | Units State Summary     | Address     | Ready? |
+    +-------------+-------------------------+-------------+--------+
+    | blog        | 0 of 1 units in-service |             | Yes    |
+    +-------------+-------------------------+-------------+--------+
 
 Application code
 ================
 
 This document will not focus on how to write a Django blog, you can clone the
-entire source direct from Github:
+entire source direct from GitHub:
 https://github.com/globocom/tsuru-django-sample. Here is what we did for the
 project:
 
@@ -84,9 +87,9 @@ project:
 Git deployment
 ==============
 
-When you create a new app, tsuru will display the git remote that you should
+When you create a new app, tsuru will display the Git remote that you should
 use. You can always get it using `app-info
-<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#Display_information_about_an_app>`_
+<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#hdr-Display_information_about_an_app>`_
 command:
 
 .. highlight:: bash
@@ -95,18 +98,10 @@ command:
 
     $ tsuru app-info --app blog
     Application: blog
-    State: started
-    Repository: git@tsuruhost.com:blog.git
+    Repository: git@git.tsuru.io:blog.git
     Platform: python
-    Teams: elasticteam
-    Units:
-    +--------+-------------+---------+
-    | Unit   | Ip          | State   |
-    +--------+-------------+---------+
-    | blog/0 | 10.20.10.20 | started |
-    | blog/1 | 10.20.10.21 | started |
-    | blog/2 |             | pending |
-    +--------+-------------+---------+
+    Teams: tsuruteam
+    Address:
 
 The git remote will be used to deploy your application using git. You can just
 push to tsuru remote and your project will be deployed:
@@ -115,40 +110,32 @@ push to tsuru remote and your project will be deployed:
 
 ::
 
-    $ git push git@tsuruhost.com:blog.git master
-    Initialized empty Git repository in /mnt/repositories/blog.git/
-    Counting objects: 75, done.
+    $ git push git@git.tsuru.io:blog.git master
+    Counting objects: 119, done.
     Delta compression using up to 4 threads.
-    Compressing objects: 100% (70/70), done.
-    Writing objects: 100% (75/75), 11.45 KiB, done.
-    Total 75 (delta 36), reused 0 (delta 0)
+    Compressing objects: 100% (53/53), done.
+    Writing objects: 100% (119/119), 16.24 KiB, done.
+    Total 119 (delta 55), reused 119 (delta 55)
     remote:
     remote:  ---> Tsuru receiving push
     remote:
-    remote:  ---> Clonning your code in your machines
-    remote: Cloning into '/home/application/current'...
-    remote:
-    remote:  ---> Parsing app.conf
-    remote:
-    remote:  ---> Running pre-restart
+    remote: From git://cloud.tsuru.io/blog.git
+    remote:  * branch            master     -> FETCH_HEAD
     remote:
     remote:  ---> Installing dependencies
     #####################################
     #          OMIT (see below)         #
     #####################################
     remote:  ---> Restarting your app
-    remote: /home/ubuntu
-    remote:
-    remote:  ---> Running post-restart
     remote:
     remote:  ---> Deploy done!
     remote:
-    To git@tsuruhost.com:blog.git
+    To git@git.tsuru.io:blog.git
        a211fba..bbf5b53  master -> master
 
 If you get a "Permission denied (publickey).", make sure you're member of a
 team and have a public key added to tsuru. To add a key, use `key-add
-<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#Add_SSH_public_key_to_tsuru_s_git_server>`_
+<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#hdr-Add_SSH_public_key_to_tsuru_s_git_server>`_
 command:
 
 .. highlight:: bash
@@ -164,7 +151,7 @@ you want to push:
 
 ::
 
-    $ git remote add tsuru git@tsuruhost.com:blog.git
+    $ git remote add tsuru git@git.tsuru.io:blog.git
 
 Then you can run:
 
@@ -183,21 +170,19 @@ And you will be also able to omit the ``--app`` flag from now on:
 
     $ tsuru app-info
     Application: blog
-    State: started
-    Repository: git@tsuruhost.com:blog.git
+    Repository: git@git.tsuru.io:blog.git
     Platform: python
-    Teams: elasticteam
+    Teams: tsuruteam
+    Address: blog.cloud.tsuru.io
     Units:
-    +--------+-------------+---------+
-    | Unit   | Ip          | State   |
-    +--------+-------------+---------+
-    | blog/0 | 10.20.10.20 | started |
-    | blog/1 | 10.20.10.21 | started |
-    | blog/2 |             | pending |
-    +--------+-------------+---------+
+    +--------------+---------+
+    | Unit         | State   |
+    +--------------+---------+
+    | 9e70748f4f25 | started |
+    +--------------+---------+
 
 For more details on the ``--app`` flag, see `"Guessing app names"
-<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#Guessing_app_names>`_
+<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#hdr-Guessing_app_names>`_
 section of tsuru command documentation.
 
 Listing dependencies
@@ -238,7 +223,7 @@ And here is ``requirements.txt``:
 
 Please notice that we've included ``South`` too, for database migrations, and ``Django``, off-course.
 
-You can see the complete output of installing these dependencies above:
+You can see the complete output of installing these dependencies bellow:
 
 .. highlight:: bash
 
@@ -248,26 +233,20 @@ You can see the complete output of installing these dependencies above:
     #####################################
     #                OMIT               #
     #####################################
-    remote:  ---> Installing dependencies
-    remote: 2012-10-09 20:05:35,256 INFO Connecting to environment...
-    remote: 2012-10-09 20:05:36,531 INFO Connected to environment.
-    remote: 2012-10-09 20:05:36,629 INFO Connecting to machine 50 at 10.20.10.20
     remote: Reading package lists...
     remote: Building dependency tree...
     remote: Reading state information...
-    remote: libmysqlclient-dev is already the newest version.
+    remote: python-dev is already the newest version.
     remote: The following extra packages will be installed:
-    remote:   libexpat1-dev libssl-dev libssl-doc python2.7-dev
+    remote:   libmysqlclient18 mysql-common
     remote: The following NEW packages will be installed:
-    remote:   libexpat1-dev libssl-dev libssl-doc python-dev python2.7-dev
-    remote: 0 upgraded, 5 newly installed, 0 to remove and 0 not upgraded.
-    remote: Need to get 32.3 MB of archives.
-    remote: After this operation, 47.8 MB of additional disk space will be used.
-    remote: Get:1 http://us-east-1.ec2.archive.ubuntu.com/ubuntu/ precise-updates/main libexpat1-dev amd64 2.0.1-7.2ubuntu1.1 [216 kB]
-    remote: Get:2 http://us-east-1.ec2.archive.ubuntu.com/ubuntu/ precise-updates/main libssl-dev amd64 1.0.1-4ubuntu5.5 [1,525 kB]
-    remote: Get:3 http://us-east-1.ec2.archive.ubuntu.com/ubuntu/ precise-updates/main libssl-doc all 1.0.1-4ubuntu5.5 [1,034 kB]
-    remote: Get:4 http://us-east-1.ec2.archive.ubuntu.com/ubuntu/ precise-updates/main python2.7-dev amd64 2.7.3-0ubuntu3.1 [29.5 MB]
-    remote: Get:5 http://us-east-1.ec2.archive.ubuntu.com/ubuntu/ precise/main python-dev amd64 2.7.3-0ubuntu2 [1,088 B]
+    remote:   libmysqlclient-dev libmysqlclient18 mysql-common
+    remote: 0 upgraded, 3 newly installed, 0 to remove and 0 not upgraded.
+    remote: Need to get 2360 kB of archives.
+    remote: After this operation, 9289 kB of additional disk space will be used.
+    remote: Get:1 http://archive.ubuntu.com/ubuntu/ quantal/main mysql-common all 5.5.27-0ubuntu2 [13.7 kB]
+    remote: Get:2 http://archive.ubuntu.com/ubuntu/ quantal/main libmysqlclient18 amd64 5.5.27-0ubuntu2 [949 kB]
+    remote: Get:3 http://archive.ubuntu.com/ubuntu/ quantal/main libmysqlclient-dev amd64 5.5.27-0ubuntu2 [1398 kB]
     remote: debconf: unable to initialize frontend: Dialog
     remote: debconf: (Dialog frontend will not work on a dumb terminal, an emacs shell buffer, or without a controlling terminal.)
     remote: debconf: falling back to frontend: Readline
@@ -275,31 +254,22 @@ You can see the complete output of installing these dependencies above:
     remote: debconf: (This frontend requires a controlling tty.)
     remote: debconf: falling back to frontend: Teletype
     remote: dpkg-preconfigure: unable to re-open stdin:
-    remote: Fetched 32.3 MB in 3s (10.1 MB/s)
-    remote: Selecting previously unselected package libexpat1-dev.
-    remote: (Reading database ... 32858 files and directories currently installed.)
-    remote: Unpacking libexpat1-dev (from .../libexpat1-dev_2.0.1-7.2ubuntu1.1_amd64.deb) ...
-    remote: Selecting previously unselected package libssl-dev.
-    remote: Unpacking libssl-dev (from .../libssl-dev_1.0.1-4ubuntu5.5_amd64.deb) ...
-    remote: Selecting previously unselected package libssl-doc.
-    remote: Unpacking libssl-doc (from .../libssl-doc_1.0.1-4ubuntu5.5_all.deb) ...
-    remote: Selecting previously unselected package python2.7-dev.
-    remote: Unpacking python2.7-dev (from .../python2.7-dev_2.7.3-0ubuntu3.1_amd64.deb) ...
-    remote: Selecting previously unselected package python-dev.
-    remote: Unpacking python-dev (from .../python-dev_2.7.3-0ubuntu2_amd64.deb) ...
-    remote: Processing triggers for man-db ...
-    remote: debconf: unable to initialize frontend: Dialog
-    remote: debconf: (Dialog frontend will not work on a dumb terminal, an emacs shell buffer, or without a controlling terminal.)
-    remote: debconf: falling back to frontend: Readline
-    remote: debconf: unable to initialize frontend: Readline
-    remote: debconf: (This frontend requires a controlling tty.)
-    remote: debconf: falling back to frontend: Teletype
-    remote: Setting up libexpat1-dev (2.0.1-7.2ubuntu1.1) ...
-    remote: Setting up libssl-dev (1.0.1-4ubuntu5.5) ...
-    remote: Setting up libssl-doc (1.0.1-4ubuntu5.5) ...
-    remote: Setting up python2.7-dev (2.7.3-0ubuntu3.1) ...
-    remote: Setting up python-dev (2.7.3-0ubuntu2) ...
-    remote: Requirement already satisfied (use --upgrade to upgrade): Django==1.4.1 in /usr/local/lib/python2.7/dist-packages (from -r /home/application/current/requirements.txt (line 1))
+    remote: Fetched 2360 kB in 1s (1285 kB/s)
+    remote: Selecting previously unselected package mysql-common.
+    remote: (Reading database ... 23143 files and directories currently installed.)
+    remote: Unpacking mysql-common (from .../mysql-common_5.5.27-0ubuntu2_all.deb) ...
+    remote: Selecting previously unselected package libmysqlclient18:amd64.
+    remote: Unpacking libmysqlclient18:amd64 (from .../libmysqlclient18_5.5.27-0ubuntu2_amd64.deb) ...
+    remote: Selecting previously unselected package libmysqlclient-dev.
+    remote: Unpacking libmysqlclient-dev (from .../libmysqlclient-dev_5.5.27-0ubuntu2_amd64.deb) ...
+    remote: Setting up mysql-common (5.5.27-0ubuntu2) ...
+    remote: Setting up libmysqlclient18:amd64 (5.5.27-0ubuntu2) ...
+    remote: Setting up libmysqlclient-dev (5.5.27-0ubuntu2) ...
+    remote: Processing triggers for libc-bin ...
+    remote: ldconfig deferred processing now taking place
+    remote: sudo: Downloading/unpacking Django==1.4.1 (from -r /home/application/current/requirements.txt (line 1))
+    remote:   Running setup.py egg_info for package Django
+    remote:
     remote: Downloading/unpacking MySQL-python==1.2.3 (from -r /home/application/current/requirements.txt (line 2))
     remote:   Running setup.py egg_info for package MySQL-python
     remote:
@@ -309,12 +279,19 @@ You can see the complete output of installing these dependencies above:
     remote: Downloading/unpacking South==0.7.6 (from -r /home/application/current/requirements.txt (line 3))
     remote:   Running setup.py egg_info for package South
     remote:
-    remote: Installing collected packages: MySQL-python, South
+    remote: Installing collected packages: Django, MySQL-python, South
+    remote:   Running setup.py install for Django
+    remote:     changing mode of build/scripts-2.7/django-admin.py from 644 to 755
+    remote:
+    remote:     changing mode of /usr/local/bin/django-admin.py to 755
     remote:   Running setup.py install for MySQL-python
     remote:     building '_mysql' extension
     remote:     gcc -pthread -fno-strict-aliasing -DNDEBUG -g -fwrapv -O2 -Wall -Wstrict-prototypes -fPIC -Dversion_info=(1,2,3,'final',0) -D__version__=1.2.3 -I/usr/include/mysql -I/usr/include/python2.7 -c _mysql.c -o build/temp.linux-x86_64-2.7/_mysql.o -DBIG_JOINS=1 -fno-strict-aliasing -g
     remote:     In file included from _mysql.c:36:0:
     remote:     /usr/include/mysql/my_config.h:422:0: warning: "HAVE_WCSCOLL" redefined [enabled by default]
+    remote:     In file included from /usr/include/python2.7/Python.h:8:0,
+    remote:                      from pymemcompat.h:10,
+    remote:                      from _mysql.c:29:
     remote:     /usr/include/python2.7/pyconfig.h:890:0: note: this is the location of the previous definition
     remote:     gcc -pthread -shared -Wl,-O1 -Wl,-Bsymbolic-functions -Wl,-Bsymbolic-functions -Wl,-z,relro build/temp.linux-x86_64-2.7/_mysql.o -L/usr/lib/x86_64-linux-gnu -lmysqlclient_r -lpthread -lz -lm -lrt -ldl -o build/lib.linux-x86_64-2.7/_mysql.so
     remote:
@@ -323,12 +300,12 @@ You can see the complete output of installing these dependencies above:
     remote:     warning: no files found matching 'GPL'
     remote:   Running setup.py install for South
     remote:
-    remote: Successfully installed MySQL-python South
+    remote: Successfully installed Django MySQL-python South
     remote: Cleaning up...
     #####################################
     #                OMIT               #
     #####################################
-    To git@tsuruhost.com:blog.git
+    To git@git.tsuru.io:blog.git
        a211fba..bbf5b53  master -> master
 
 Running the application
@@ -346,9 +323,9 @@ how the Procfile should look like:
 
 ::
 
-    web: gunicorn -b 0.0.0.0:8888 blog.wsgi
+    web: gunicorn -b 0.0.0.0:$PORT blog.wsgi
 
-Now that we commit the file and push the changes to tsuru git server, running
+Now we commit the file and push the changes to tsuru git server, running
 another deploy:
 
 .. highlight:: bash
@@ -366,22 +343,7 @@ another deploy:
     remote:
     remote:  ---> Tsuru receiving push
     remote:
-    remote:  ---> Clonning your code in your machines
-    remote: From git://tsuruhost.com/blog
-    remote:  * branch            master     -> FETCH_HEAD
-    remote: Updating 81e884e..530c528
-    remote: Fast-forward
-    remote:  Procfile |    2 +-
-    remote:  1 file changed, 1 insertion(+), 1 deletion(-)
-    remote:
-    remote:  ---> Parsing app.conf
-    remote:
-    remote:  ---> Running pre-restart
-    remote:
     remote:  ---> Installing dependencies
-    remote: 2012-10-10 13:47:29,999 INFO Connecting to environment...
-    remote: 2012-10-10 13:47:31,175 INFO Connected to environment.
-    remote: 2012-10-10 13:47:31,255 INFO Connecting to machine 50 at 10.20.10.20
     remote: Reading package lists...
     remote: Building dependency tree...
     remote: Reading state information...
@@ -394,15 +356,11 @@ another deploy:
     remote: Cleaning up...
     remote:
     remote:  ---> Restarting your app
-    remote: WARNING: python not running.
     remote: /var/lib/tsuru/hooks/start: line 13: gunicorn: command not found
-    remote: /home/ubuntu
-    remote:
-    remote:  ---> Running post-restart
     remote:
     remote:  ---> Deploy done!
     remote:
-    To git@tsuruhost.com:blog.git
+    To git@git.tsuru.io:blog.git
        81e884e..530c528  master -> master
 
 Now we get an error: ``gunicorn: command not found``. It means that we need to
@@ -414,7 +372,7 @@ add gunicorn to ``requirements.txt`` file:
 
     $ cat >> requirements.txt
     gunicorn==0.14.6
-    ^-D
+    ^D
 
 Now we commit the changes and run another deploy:
 
@@ -433,41 +391,29 @@ Now we commit the changes and run another deploy:
     remote:
     remote:  ---> Tsuru receiving push
     remote:
-    remote:  ---> Clonning your code in your machines
-    remote: From git://ec2-23-22-70-116.compute-1.amazonaws.com/blog
-    remote:  * branch            master     -> FETCH_HEAD
-    remote: Updating 530c528..542403a
-    remote: Fast-forward
-    remote:  requirements.txt |    1 +
-    remote:  1 file changed, 1 insertion(+)
     [...]
     remote:  ---> Restarting your app
-    remote: WARNING: python not running.
-    remote: /home/ubuntu
-    remote:
-    remote:  ---> Running post-restart
     remote:
     remote:  ---> Deploy done!
     remote:
-    To git@tsuruhost.com:blog.git
+    To git@git.tsuru.io:blog.git
        530c528..542403a  master -> master
 
 Now that the app is deployed, you can access it from your browser, getting the
 IP or host listed in ``app-list`` and opening it. For example,
 in the list below:
 
-.. highlight:: bash
-
 ::
 
     $ tsuru app-list
-    +-------------+---------+-------------+
-    | Application | State   | Ip          |
-    +-------------+---------+-------------+
-    | blog        | started | 10.20.10.20 |
-    +-------------+---------+-------------+
+    +-------------+-------------------------+---------------------+--------+
+    | Application | Units State Summary     | Address             | Ready? |
+    +-------------+-------------------------+---------------------+--------+
+    | blog        | 1 of 1 units in-service | blog.cloud.tsuru.io | Yes    |
+    +-------------+-------------------------+---------------------+--------+
 
-We can access the admin of the app in the URL http://10.20.10.20/admin/.
+
+We can access the admin of the app in the URL http://blog.cloud.tsuru.io/admin/.
 
 Using services
 ==============
@@ -482,7 +428,7 @@ we must use a service. The service workflow can be resumed to two steps:
 #. Bind the service instance to the app
 
 But how can I see what services are available? Easy! Use `service-list
-<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#List_available_services_and_instances>`_
+<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#hdr-List_available_services_and_instances>`_
 command:
 
 .. highlight:: bash
@@ -498,9 +444,9 @@ command:
     +----------------+-----------+
 
 The output from ``service-list`` above says that there are two available
-services: "elastic-search" and "mysql", and none instances. To create our MySQL
+services: "elastic-search" and "mysql", and no instances. To create our MySQL
 instance, we should run the `service-add
-<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#Create_a_new_service_instance>`_
+<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#hdr-Create_a_new_service_instance>`_
 command:
 
 .. highlight:: bash
@@ -526,7 +472,7 @@ the list:
     +----------------+-----------+
 
 To bind the service instance to the application, we use the `bind
-<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#Bind_an_application_to_a_service_instance>`_
+<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#hdr-Bind_an_application_to_a_service_instance>`_
 command:
 
 .. highlight:: bash
@@ -534,7 +480,7 @@ command:
 ::
 
     $ tsuru bind blogsql
-    Instance blogsql successfully binded to the app blog.
+    Instance blogsql is now bound to the app blog.
 
     The following environment variables are now available for use in your app:
 
@@ -546,7 +492,7 @@ command:
 
     For more details, please check the documentation for the service, using service-doc command.
 
-As you can see from bind output, we use environment variable to connect to the
+As you can see from bind output, we use environment variables to connect to the
 MySQL server. Next step is update ``settings.py`` to use these variables to
 connect in the database:
 
@@ -584,31 +530,16 @@ Now let's commit it and run another deploy:
     remote:
     remote:  ---> Tsuru receiving push
     remote:
-    remote:  ---> Clonning your code in your machines
-    remote: From git://ec2-23-22-70-116.compute-1.amazonaws.com/blog
-    remote:  * branch            master     -> FETCH_HEAD
-    remote: Updating ab4e706..a780de9
-    remote: Fast-forward
-    remote:  blog/settings.py |   12 +++++++-----
-    remote:  1 file changed, 7 insertions(+), 5 deletions(-)
-    remote:
-    remote:  ---> Parsing app.conf
-    remote:
     remote:  ---> Installing dependencies
     #####################################
     #               OMIT                #
     #####################################
     remote:
-    remote:  ---> Running pre-restart
-    remote:
     remote:  ---> Restarting your app
-    remote: /home/ubuntu
-    remote:
-    remote:  ---> Running post-restart
     remote:
     remote:  ---> Deploy done!
     remote:
-    To git@ec2-23-22-70-116.compute-1.amazonaws.com:blog.git
+    To git@git.tsuru.io:blog.git
        ab4e706..a780de9  master -> master
 
 Now if we try to access the admin again, we will get another error: `"Table
@@ -616,7 +547,7 @@ Now if we try to access the admin again, we will get another error: `"Table
 to the database, so bind worked, but we did not set up the database yet. We
 need to run ``syncdb`` and ``migrate`` (if we're using South) in the remote
 server. We can use `run
-<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#Run_an_arbitrary_command_in_the_app_machine>`_
+<http://godoc.org/github.com/globocom/tsuru/cmd/tsuru#hdr-Run_an_arbitrary_command_in_the_app_machine>`_
 command to execute commands in the machine, so for running ``syncdb`` we could
 write:
 
@@ -624,7 +555,7 @@ write:
 
 ::
 
-    $ tsuru run python manage.py syncdb --noinput
+    $ tsuru run -- python manage.py syncdb --noinput
     Syncing...
     Creating tables ...
     Creating table auth_permission
@@ -663,39 +594,21 @@ Deployment hooks
 
 It would be boring to manually run ``syncdb`` and/or ``migrate`` after every
 deployment. So we can configure an automatic hook to always run before or after
-the app restarts. As you can see in the deploy output, there are three key
-sections related to that hooks:
+the app restarts.
 
-.. highlight:: bash
-
-::
-
-    $ git push tsuru master
-    ######
-    remote:  ---> Parsing app.conf
-    remote:
-    ######
-    remote:
-    remote:  ---> Running pre-restart
-    remote:
-    ######
-    remote:
-    remote:  ---> Running post-restart
-    remote:
-    ######
-
-So, tsuru parses a file called ``app.conf`` and runs ``pre-restart`` and
-``post-restart`` hooks. app.conf is a YAML file, that contains a list of
-commands that should run in pre-restart and post-restart hooks. Here is our
-example of app.conf:
+Tsuru parses a file called ``app.yaml`` and runs ``pre-restart`` and
+``post-restart`` hooks. As the extension suggests, this is a YAML file, that
+contains a list of commands that should run in pre-restart and post-restart
+hooks. Here is our example of app.yaml:
 
 .. highlight:: yaml
 
 ::
 
-    post-restart:
-      - python manage.py syncdb --noinput
-      - python manage.py migrate
+    hooks:
+      post-restart:
+        - python manage.py syncdb --noinput
+        - python manage.py migrate
 
 It should be located in the root of the project. Let's commit and deploy it:
 
@@ -703,8 +616,8 @@ It should be located in the root of the project. Let's commit and deploy it:
 
 ::
 
-    $ git add app.conf
-    $ git commit -m "app.conf: added file"
+    $ git add app.yaml
+    $ git commit -m "app.yaml: added file"
     $ git push tsuru master
     Counting objects: 4, done.
     Delta compression using up to 4 threads.
@@ -713,17 +626,6 @@ It should be located in the root of the project. Let's commit and deploy it:
     Total 3 (delta 1), reused 0 (delta 0)
     remote:
     remote:  ---> Tsuru receiving push
-    remote:
-    remote:  ---> Clonning your code in your machines
-    remote: From git://ec2-23-22-70-116.compute-1.amazonaws.com/blog
-    remote:  * branch            master     -> FETCH_HEAD
-    remote: Updating a780de9..1b675b8
-    remote: Fast-forward
-    remote:  app.conf |    3 +++
-    remote:  1 file changed, 3 insertions(+)
-    remote:  create mode 100644 app.conf
-    remote:
-    remote:  ---> Parsing app.conf
     remote:
     remote:  ---> Installing dependencies
     remote: Reading package lists...
@@ -738,22 +640,13 @@ It should be located in the root of the project. Let's commit and deploy it:
     remote: Requirement already satisfied (use --upgrade to upgrade): gunicorn==0.14.6 in /usr/local/lib/python2.7/dist-packages (from -r /home/application/current/requirements.txt (line 4))
     remote: Cleaning up...
     remote:
-    remote:  ---> Running pre-restart
-    remote:
     remote:  ---> Restarting your app
-    remote: /home/ubuntu
     remote:
     remote:  ---> Running post-restart
-    remote: 2012-10-15 13:29:51,970 INFO Connecting to environment...
-    remote: 2012-10-15 13:29:53,212 INFO Connected to environment.
-    remote: 2012-10-15 13:29:53,293 INFO Connecting to machine 50 at ec2-23-22-196-207.compute-1.amazonaws.com
-    remote: 2012-10-15 13:29:55,013 INFO Connecting to environment...
-    remote: 2012-10-15 13:29:56,144 INFO Connected to environment.
-    remote: 2012-10-15 13:29:56,282 INFO Connecting to machine 50 at ec2-23-22-196-207.compute-1.amazonaws.com
     remote:
     remote:  ---> Deploy done!
     remote:
-    To git@ec2-23-22-70-116.compute-1.amazonaws.com:blog.git
+    To git@git.tsuru.io:blog.git
        a780de9..1b675b8  master -> master
 
 It's done! Now we have a Django project deployed on tsuru, using a MySQL

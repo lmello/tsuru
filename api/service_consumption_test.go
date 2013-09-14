@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package api
 
 import (
 	"bytes"
@@ -13,6 +13,7 @@ import (
 	"github.com/globocom/tsuru/db"
 	"github.com/globocom/tsuru/errors"
 	"github.com/globocom/tsuru/service"
+	"github.com/globocom/tsuru/testing"
 	"io/ioutil"
 	"labix.org/v2/mgo/bson"
 	"launchpad.net/gocheck"
@@ -33,6 +34,7 @@ func (s *ConsumptionSuite) SetUpSuite(c *gocheck.C) {
 	var err error
 	config.Set("database:url", "127.0.0.1:27017")
 	config.Set("database:name", "tsuru_api_consumption_test")
+	config.Set("auth:hash-cost", 4)
 	s.conn, err = db.Conn()
 	c.Assert(err, gocheck.IsNil)
 	s.createUserAndTeam(c)
@@ -61,7 +63,7 @@ func (s *ConsumptionSuite) createUserAndTeam(c *gocheck.C) {
 }
 
 func makeRequestToCreateInstanceHandler(c *gocheck.C) (*httptest.ResponseRecorder, *http.Request) {
-	b := bytes.NewBufferString(`{"name": "brainSQL", "service_name": "mysql", "app": "my_app"}`)
+	b := bytes.NewBufferString(`{"name":"brainSQL","service_name":"mysql"}`)
 	request, err := http.NewRequest("POST", "/services/instances", b)
 	c.Assert(err, gocheck.IsNil)
 	request.Header.Set("Content-Type", "application/json")
@@ -82,7 +84,7 @@ func (s *ConsumptionSuite) TestCreateInstanceHandlerSavesServiceInstanceInDb(c *
 	se.Create()
 	defer s.conn.Services().Remove(bson.M{"_id": se.Name})
 	recorder, request := makeRequestToCreateInstanceHandler(c)
-	err := CreateInstanceHandler(recorder, request, s.token)
+	err := createServiceInstance(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	var si service.ServiceInstance
 	err = s.conn.ServiceInstances().Find(bson.M{"name": "brainSQL", "service_name": "mysql"}).One(&si)
@@ -90,6 +92,12 @@ func (s *ConsumptionSuite) TestCreateInstanceHandlerSavesServiceInstanceInDb(c *
 	s.conn.ServiceInstances().Update(bson.M{"name": si.Name}, si)
 	c.Assert(si.Name, gocheck.Equals, "brainSQL")
 	c.Assert(si.ServiceName, gocheck.Equals, "mysql")
+	action := testing.Action{
+		Action: "create-service-instance",
+		User:   s.user.Email,
+		Extra:  []interface{}{`{"name":"brainSQL","service_name":"mysql"}`},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *ConsumptionSuite) TestCreateInstanceHandlerSavesAllTeamsThatTheGivenUserIsMemberAndHasAccessToTheServiceInTheInstance(c *gocheck.C) {
@@ -104,7 +112,7 @@ func (s *ConsumptionSuite) TestCreateInstanceHandlerSavesAllTeamsThatTheGivenUse
 	err = srv.Create()
 	c.Assert(err, gocheck.IsNil)
 	recorder, request := makeRequestToCreateInstanceHandler(c)
-	err = CreateInstanceHandler(recorder, request, s.token)
+	err = createServiceInstance(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	var si service.ServiceInstance
 	err = s.conn.ServiceInstances().Find(bson.M{"name": "brainSQL"}).One(&si)
@@ -117,7 +125,7 @@ func (s *ConsumptionSuite) TestCreateInstanceHandlerReturnsErrorWhenUserCannotUs
 	service := service.Service{Name: "mysql", IsRestricted: true}
 	service.Create()
 	recorder, request := makeRequestToCreateInstanceHandler(c)
-	err := CreateInstanceHandler(recorder, request, s.token)
+	err := createServiceInstance(recorder, request, s.token)
 	c.Assert(err, gocheck.ErrorMatches, "^This user does not have access to this service$")
 }
 
@@ -131,7 +139,7 @@ func (s *ConsumptionSuite) TestCreateInstanceHandlerIgnoresTeamAuthIfServiceIsNo
 	c.Assert(err, gocheck.IsNil)
 	defer s.conn.Services().Remove(bson.M{"_id": "mysql"})
 	recorder, request := makeRequestToCreateInstanceHandler(c)
-	err = CreateInstanceHandler(recorder, request, s.token)
+	err = createServiceInstance(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	var si service.ServiceInstance
 	err = s.conn.ServiceInstances().Find(bson.M{"name": "brainSQL"}).One(&si)
@@ -142,8 +150,8 @@ func (s *ConsumptionSuite) TestCreateInstanceHandlerIgnoresTeamAuthIfServiceIsNo
 
 func (s *ConsumptionSuite) TestCreateInstanceHandlerReturnsErrorWhenServiceDoesntExists(c *gocheck.C) {
 	recorder, request := makeRequestToCreateInstanceHandler(c)
-	err := CreateInstanceHandler(recorder, request, s.token)
-	c.Assert(err, gocheck.ErrorMatches, "^Service mysql does not exist.$")
+	err := createServiceInstance(recorder, request, s.token)
+	c.Assert(err.Error(), gocheck.Equals, "Service not found")
 }
 
 func (s *ConsumptionSuite) TestCreateInstanceHandlerReturnErrorIfTheServiceAPICallFailAndDoesNotSaveTheInstanceInTheDatabase(c *gocheck.C) {
@@ -156,7 +164,7 @@ func (s *ConsumptionSuite) TestCreateInstanceHandlerReturnErrorIfTheServiceAPICa
 	c.Assert(err, gocheck.IsNil)
 	defer s.conn.Services().Remove(bson.M{"_id": "mysql"})
 	recorder, request := makeRequestToCreateInstanceHandler(c)
-	err = CreateInstanceHandler(recorder, request, s.token)
+	err = createServiceInstance(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
 }
 
@@ -182,7 +190,7 @@ func (s *ConsumptionSuite) TestRemoveServiceInstanceHandler(c *gocheck.C) {
 	err = si.Create()
 	c.Assert(err, gocheck.IsNil)
 	recorder, request := makeRequestToRemoveInstanceHandler("foo-instance", c)
-	err = RemoveServiceInstanceHandler(recorder, request, s.token)
+	err = removeServiceInstance(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	b, err := ioutil.ReadAll(recorder.Body)
 	c.Assert(err, gocheck.IsNil)
@@ -190,6 +198,12 @@ func (s *ConsumptionSuite) TestRemoveServiceInstanceHandler(c *gocheck.C) {
 	n, err := s.conn.ServiceInstances().Find(bson.M{"name": "foo-instance"}).Count()
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(n, gocheck.Equals, 0)
+	action := testing.Action{
+		Action: "remove-service-instance",
+		User:   s.user.Email,
+		Extra:  []interface{}{"foo-instance"},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *ConsumptionSuite) TestRemoveServiceHandlerWithoutPermissionShouldReturn401(c *gocheck.C) {
@@ -202,8 +216,8 @@ func (s *ConsumptionSuite) TestRemoveServiceHandlerWithoutPermissionShouldReturn
 	defer s.conn.ServiceInstances().Remove(bson.M{"name": si.Name})
 	c.Assert(err, gocheck.IsNil)
 	recorder, request := makeRequestToRemoveInstanceHandler("foo-instance", c)
-	err = RemoveServiceInstanceHandler(recorder, request, s.token)
-	c.Assert(err, gocheck.ErrorMatches, "^This user does not have access to this service instance$")
+	err = removeServiceInstance(recorder, request, s.token)
+	c.Assert(err.Error(), gocheck.Equals, service.ErrAccessNotAllowed.Error())
 }
 
 func (s *ConsumptionSuite) TestRemoveServiceHandlerWIthAssociatedAppsShouldFailAndReturnError(c *gocheck.C) {
@@ -216,7 +230,7 @@ func (s *ConsumptionSuite) TestRemoveServiceHandlerWIthAssociatedAppsShouldFailA
 	defer s.conn.ServiceInstances().Remove(bson.M{"name": si.Name})
 	c.Assert(err, gocheck.IsNil)
 	recorder, request := makeRequestToRemoveInstanceHandler("foo-instance", c)
-	err = RemoveServiceInstanceHandler(recorder, request, s.token)
+	err = removeServiceInstance(recorder, request, s.token)
 	c.Assert(err, gocheck.ErrorMatches, "^This service instance is bound to at least one app. Unbind them before removing it$")
 }
 
@@ -235,7 +249,7 @@ func (s *ConsumptionSuite) TestRemoveServiceShouldCallTheServiceAPI(c *gocheck.C
 	c.Assert(err, gocheck.IsNil)
 	defer s.conn.ServiceInstances().Remove(bson.M{"name": si.Name})
 	recorder, request := makeRequestToRemoveInstanceHandler("purity-instance", c)
-	err = RemoveServiceInstanceHandler(recorder, request, s.token)
+	err = removeServiceInstance(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(called, gocheck.Equals, true)
 }
@@ -255,7 +269,7 @@ func (s *ConsumptionSuite) TestServicesInstancesHandler(c *gocheck.C) {
 	request, err := http.NewRequest("GET", "/services/instances", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = ServicesInstancesHandler(recorder, request, s.token)
+	err = serviceInstances(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	body, err := ioutil.ReadAll(recorder.Body)
 	c.Assert(err, gocheck.IsNil)
@@ -266,6 +280,8 @@ func (s *ConsumptionSuite) TestServicesInstancesHandler(c *gocheck.C) {
 		{Service: "redis", Instances: []string{"redis-globo"}},
 	}
 	c.Assert(instances, gocheck.DeepEquals, expected)
+	action := testing.Action{Action: "list-service-instances", User: s.user.Email}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *ConsumptionSuite) TestServicesInstancesHandlerReturnsOnlyServicesThatTheUserHasAccess(c *gocheck.C) {
@@ -290,7 +306,7 @@ func (s *ConsumptionSuite) TestServicesInstancesHandlerReturnsOnlyServicesThatTh
 	request, err := http.NewRequest("GET", "/services/instances", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = ServicesInstancesHandler(recorder, request, token)
+	err = serviceInstances(recorder, request, token)
 	c.Assert(err, gocheck.IsNil)
 	body, err := ioutil.ReadAll(recorder.Body)
 	c.Assert(err, gocheck.IsNil)
@@ -333,7 +349,7 @@ func (s *ConsumptionSuite) TestServicesInstancesHandlerFilterInstancesPerService
 	request, err := http.NewRequest("GET", "/services/instances", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = ServicesInstancesHandler(recorder, request, s.token)
+	err = serviceInstances(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	body, err := ioutil.ReadAll(recorder.Body)
 	c.Assert(err, gocheck.IsNil)
@@ -369,27 +385,44 @@ func (s *ConsumptionSuite) TestServiceInstanceStatusHandler(c *gocheck.C) {
 	err := srv.Create()
 	c.Assert(err, gocheck.IsNil)
 	defer srv.Delete()
+	si := service.ServiceInstance{Name: "my_nosql", ServiceName: srv.Name, Teams: []string{s.team.Name}}
+	err = si.Create()
+	c.Assert(err, gocheck.IsNil)
+	defer service.DeleteInstance(&si)
+	recorder, request := makeRequestToStatusHandler("my_nosql", c)
+	err = serviceInstanceStatus(recorder, request, s.token)
+	c.Assert(err, gocheck.IsNil)
+	b, err := ioutil.ReadAll(recorder.Body)
+	c.Assert(string(b), gocheck.Equals, "Service instance \"my_nosql\" is up")
+	action := testing.Action{
+		Action: "service-instance-status",
+		User:   s.user.Email,
+		Extra:  []interface{}{"my_nosql"},
+	}
+	c.Assert(action, testing.IsRecorded)
+}
+
+func (s *ConsumptionSuite) TestServiceInstanceStatusHandlerShouldReturnErrorWhenServiceInstanceNotExists(c *gocheck.C) {
+	recorder, request := makeRequestToStatusHandler("inexistent-instance", c)
+	err := serviceInstanceStatus(recorder, request, s.token)
+	c.Assert(err, gocheck.ErrorMatches, "^Service instance not found$")
+}
+
+func (s *ConsumptionSuite) TestServiceInstanceStatusHandlerShouldReturnForbiddenWhenUserDontHaveAccess(c *gocheck.C) {
+	srv := service.Service{Name: "mongodb", OwnerTeams: []string{s.team.Name}}
+	err := srv.Create()
+	c.Assert(err, gocheck.IsNil)
+	defer srv.Delete()
 	si := service.ServiceInstance{Name: "my_nosql", ServiceName: srv.Name}
 	err = si.Create()
 	c.Assert(err, gocheck.IsNil)
 	defer service.DeleteInstance(&si)
 	recorder, request := makeRequestToStatusHandler("my_nosql", c)
-	err = ServiceInstanceStatusHandler(recorder, request, s.token)
-	c.Assert(err, gocheck.IsNil)
-	b, err := ioutil.ReadAll(recorder.Body)
-	c.Assert(string(b), gocheck.Equals, "Service instance \"my_nosql\" is up")
-}
-
-func (s *ConsumptionSuite) TestServiceInstanceStatusHandlerShouldReturnErrorWHenNameIsNotProvided(c *gocheck.C) {
-	recorder, request := makeRequestToStatusHandler("", c)
-	err := ServiceInstanceStatusHandler(recorder, request, s.token)
-	c.Assert(err, gocheck.ErrorMatches, "^Service instance name not provided.$")
-}
-
-func (s *ConsumptionSuite) TestServiceInstanceStatusHandlerShouldReturnErrorWhenServiceInstanceNotExists(c *gocheck.C) {
-	recorder, request := makeRequestToStatusHandler("inexistent-instance", c)
-	err := ServiceInstanceStatusHandler(recorder, request, s.token)
-	c.Assert(err, gocheck.ErrorMatches, "^Service instance does not exists, error: not found$")
+	err = serviceInstanceStatus(recorder, request, s.token)
+	c.Assert(err, gocheck.NotNil)
+	e, ok := err.(*errors.HTTP)
+	c.Assert(ok, gocheck.Equals, true)
+	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
 }
 
 func (s *ConsumptionSuite) TestServiceInfoHandler(c *gocheck.C) {
@@ -415,10 +448,10 @@ func (s *ConsumptionSuite) TestServiceInfoHandler(c *gocheck.C) {
 	err = si2.Create()
 	c.Assert(err, gocheck.IsNil)
 	defer service.DeleteInstance(&si2)
-	request, err := http.NewRequest("GET", fmt.Sprintf("/services/%s?:name=%s", "mongodb", "mongodb"), nil)
+	request, err := http.NewRequest("GET", "/services/mongodb?:name=mongodb", nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = ServiceInfoHandler(recorder, request, s.token)
+	err = serviceInfo(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	body, err := ioutil.ReadAll(recorder.Body)
 	c.Assert(err, gocheck.IsNil)
@@ -427,6 +460,12 @@ func (s *ConsumptionSuite) TestServiceInfoHandler(c *gocheck.C) {
 	c.Assert(err, gocheck.IsNil)
 	expected := []service.ServiceInstance{si1, si2}
 	c.Assert(instances, gocheck.DeepEquals, expected)
+	action := testing.Action{
+		Action: "service-info",
+		User:   s.user.Email,
+		Extra:  []interface{}{"mongodb"},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *ConsumptionSuite) TestServiceInfoHandlerShouldReturnOnlyInstancesOfTheSameTeamOfTheUser(c *gocheck.C) {
@@ -455,7 +494,7 @@ func (s *ConsumptionSuite) TestServiceInfoHandlerShouldReturnOnlyInstancesOfTheS
 	request, err := http.NewRequest("GET", fmt.Sprintf("/services/%s?:name=%s", "mongodb", "mongodb"), nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = ServiceInfoHandler(recorder, request, s.token)
+	err = serviceInfo(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	body, err := ioutil.ReadAll(recorder.Body)
 	c.Assert(err, gocheck.IsNil)
@@ -470,9 +509,9 @@ func (s *ConsumptionSuite) TestServiceInfoHandlerReturns404WhenTheServiceDoesNot
 	request, err := http.NewRequest("GET", fmt.Sprintf("/services/%s?:name=%s", "mongodb", "mongodb"), nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = ServiceInfoHandler(recorder, request, s.token)
+	err = serviceInfo(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
 	c.Assert(e, gocheck.ErrorMatches, "^Service not found$")
@@ -485,12 +524,60 @@ func (s *ConsumptionSuite) TestServiceInfoHandlerReturns403WhenTheUserDoesNotHav
 	request, err := http.NewRequest("DELETE", fmt.Sprintf("/services/%s?:name=%s", se.Name, se.Name), nil)
 	c.Assert(err, gocheck.IsNil)
 	recorder := httptest.NewRecorder()
-	err = ServiceInfoHandler(recorder, request, s.token)
+	err = serviceInfo(recorder, request, s.token)
 	c.Assert(err, gocheck.NotNil)
-	e, ok := err.(*errors.Http)
+	e, ok := err.(*errors.HTTP)
 	c.Assert(ok, gocheck.Equals, true)
 	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
 	c.Assert(e, gocheck.ErrorMatches, "^This user does not have access to this service$")
+}
+
+func (s *ConsumptionSuite) TestGetServiceInstance(c *gocheck.C) {
+	instance := service.ServiceInstance{
+		Name:        "mongo-1",
+		ServiceName: "mongodb",
+		Teams:       []string{s.team.Name},
+		Apps:        []string{"myapp"},
+	}
+	s.conn.ServiceInstances().Insert(instance)
+	defer s.conn.ServiceInstances().Remove(instance)
+	request, _ := http.NewRequest("GET", "/services/instances/mongo-1?:name=mongo-1", nil)
+	recorder := httptest.NewRecorder()
+	err := serviceInstance(recorder, request, s.token)
+	c.Assert(err, gocheck.IsNil)
+	var got service.ServiceInstance
+	err = json.NewDecoder(recorder.Body).Decode(&got)
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(got, gocheck.DeepEquals, instance)
+}
+
+func (s *ConsumptionSuite) TestGetServiceInstanceNotFound(c *gocheck.C) {
+	request, _ := http.NewRequest("GET", "/services/instances/mongo-1?:name=mongo-1", nil)
+	recorder := httptest.NewRecorder()
+	err := serviceInstance(recorder, request, s.token)
+	c.Assert(err, gocheck.NotNil)
+	e, ok := err.(*errors.HTTP)
+	c.Assert(ok, gocheck.Equals, true)
+	c.Assert(e.Code, gocheck.Equals, http.StatusNotFound)
+	c.Assert(e.Message, gocheck.Equals, service.ErrServiceInstanceNotFound.Error())
+}
+
+func (s *ConsumptionSuite) TestGetServiceInstanceForbidden(c *gocheck.C) {
+	instance := service.ServiceInstance{
+		Name:        "mongo-1",
+		ServiceName: "mongodb",
+		Apps:        []string{"myapp"},
+	}
+	s.conn.ServiceInstances().Insert(instance)
+	defer s.conn.ServiceInstances().Remove(instance)
+	request, _ := http.NewRequest("GET", "/services/instances/mongo-1?:name=mongo-1", nil)
+	recorder := httptest.NewRecorder()
+	err := serviceInstance(recorder, request, s.token)
+	c.Assert(err, gocheck.NotNil)
+	e, ok := err.(*errors.HTTP)
+	c.Assert(ok, gocheck.Equals, true)
+	c.Assert(e.Code, gocheck.Equals, http.StatusForbidden)
+	c.Assert(e.Message, gocheck.Equals, service.ErrAccessNotAllowed.Error())
 }
 
 func (s *ConsumptionSuite) makeRequestToGetDocHandler(name string, c *gocheck.C) (*httptest.ResponseRecorder, *http.Request) {
@@ -513,11 +600,17 @@ Collnosql is a really really cool nosql`
 	err := srv.Create()
 	c.Assert(err, gocheck.IsNil)
 	recorder, request := s.makeRequestToGetDocHandler("coolnosql", c)
-	err = Doc(recorder, request, s.token)
+	err = serviceDoc(recorder, request, s.token)
 	c.Assert(err, gocheck.IsNil)
 	b, err := ioutil.ReadAll(recorder.Body)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(string(b), gocheck.Equals, doc)
+	action := testing.Action{
+		Action: "service-doc",
+		User:   s.user.Email,
+		Extra:  []interface{}{"coolnosql"},
+	}
+	c.Assert(action, testing.IsRecorded)
 }
 
 func (s *ConsumptionSuite) TestDocHandlerReturns401WhenUserHasNoAccessToService(c *gocheck.C) {
@@ -529,13 +622,13 @@ func (s *ConsumptionSuite) TestDocHandlerReturns401WhenUserHasNoAccessToService(
 	err := srv.Create()
 	c.Assert(err, gocheck.IsNil)
 	recorder, request := s.makeRequestToGetDocHandler("coolnosql", c)
-	err = Doc(recorder, request, s.token)
+	err = serviceDoc(recorder, request, s.token)
 	c.Assert(err, gocheck.ErrorMatches, "^This user does not have access to this service$")
 }
 
 func (s *ConsumptionSuite) TestDocHandlerReturns404WhenServiceDoesNotExists(c *gocheck.C) {
 	recorder, request := s.makeRequestToGetDocHandler("inexistentsql", c)
-	err := Doc(recorder, request, s.token)
+	err := serviceDoc(recorder, request, s.token)
 	c.Assert(err, gocheck.ErrorMatches, "^Service not found$")
 }
 
@@ -571,21 +664,4 @@ func (s *ConsumptionSuite) TestGetServiceInstanceOrError(c *gocheck.C) {
 	rSi, err := getServiceInstanceOrError("foo", s.user)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(rSi.Name, gocheck.Equals, si.Name)
-}
-
-func (s *ConsumptionSuite) TestServiceAndServiceInstancesByTeamsShouldReturnServiceInstancesByTeam(c *gocheck.C) {
-	srv := service.Service{Name: "mongodb"}
-	srv.Create()
-	defer srv.Delete()
-	si := service.ServiceInstance{Name: "my_nosql", ServiceName: srv.Name, Teams: []string{s.team.Name}}
-	si.Create()
-	defer service.DeleteInstance(&si)
-	si2 := service.ServiceInstance{Name: "some_nosql", ServiceName: srv.Name}
-	si2.Create()
-	defer service.DeleteInstance(&si2)
-	obtained := serviceAndServiceInstancesByTeams(s.user)
-	expected := []service.ServiceModel{
-		{Service: "mongodb", Instances: []string{"my_nosql"}},
-	}
-	c.Assert(obtained, gocheck.DeepEquals, expected)
 }

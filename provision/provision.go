@@ -8,6 +8,7 @@ package provision
 
 import (
 	"fmt"
+	"github.com/globocom/tsuru/cmd"
 	"io"
 )
 
@@ -46,17 +47,9 @@ type Named interface {
 // AppUnit represents a unit in an app.
 type AppUnit interface {
 	Named
-
-	// Returns the number of the unit.
 	GetMachine() int
-
-	// Returns the status of the unit.
 	GetStatus() Status
-
-	// Returns the IP of the unit.
 	GetIp() string
-
-	// Returns the instance id of the unit.
 	GetInstanceId() string
 }
 
@@ -65,16 +58,35 @@ type AppUnit interface {
 // It contains only relevant information for provisioning.
 type App interface {
 	Named
-
 	// Log should be used to log messages in the app.
 	Log(message, source string) error
 
-	// GetFramework returns the framework (type) of the app. It is equivalent
+	// GetPlatform returns the platform (type) of the app. It is equivalent
 	// to the Unit `Type` field.
-	GetFramework() string
+	GetPlatform() string
 
-	// ProvisionUnits returns all units of the app, in a slice.
-	ProvisionUnits() []AppUnit
+	// GetDeploy returns the deploys that an app has.
+	GetDeploys() uint
+
+	ProvisionedUnits() []AppUnit
+	RemoveUnit(id string) error
+
+	// Run executes the command in app units. Commands executed with this
+	// method should have access to environment variables defined in the
+	// app.
+	Run(cmd string, w io.Writer, once bool) error
+
+	Restart(io.Writer) error
+
+	SerializeEnvVars() error
+
+	// Ready marks the app as ready for deployment.
+	Ready() error
+}
+
+type CNameManager interface {
+	SetCName(app App, cname string) error
+	UnsetCName(app App, cname string) error
 }
 
 // Provisioner is the basic interface of this package.
@@ -85,6 +97,10 @@ type App interface {
 // Tsuru comes with a default provisioner: juju. One can add other provisioners
 // by satisfying this interface and registering it using the function Register.
 type Provisioner interface {
+	// Deploy updates the code of the app in units to match the given
+	// version, logging progress in the given writer.
+	Deploy(app App, version string, w io.Writer) error
+
 	// Provision is called when tsuru is creating the app.
 	Provision(App) error
 
@@ -104,20 +120,34 @@ type Provisioner interface {
 	// ExecuteCommand runs a command in all units of the app.
 	ExecuteCommand(stdout, stderr io.Writer, app App, cmd string, args ...string) error
 
-	// Restart restarts the app.
+	// ExecuteCommandOnce runs a command in one unit of the app.
+	ExecuteCommandOnce(stdout, stderr io.Writer, app App, cmd string, args ...string) error
+
 	Restart(App) error
 
 	// CollectStatus returns information about all provisioned units. It's used
 	// by tsuru collector when updating the status of apps in the database.
 	CollectStatus() ([]Unit, error)
 
-	// Addr returns the address for an app. It will probably be a DNS name
-	// or IP address.
+	// Addr returns the address for an app.
 	//
 	// Tsuru will use this method to get the IP (althought it might not be
 	// an actual IP, collector calls it "IP") of the app from the
 	// provisioner.
 	Addr(App) (string, error)
+
+	// InstallDeps installs the dependencies required for the application
+	// to run and writes the log in the received writer.
+	InstallDeps(app App, w io.Writer) error
+
+	// Swap change the router between two apps.
+	Swap(App, App) error
+}
+
+// Commandable is a provisioner that provides commands to extend the tsr
+// command line interface.
+type Commandable interface {
+	Commands() []cmd.Command
 }
 
 var provisioners = make(map[string]Provisioner)
@@ -134,6 +164,15 @@ func Get(name string) (Provisioner, error) {
 		return nil, fmt.Errorf("Unknown provisioner: %q.", name)
 	}
 	return p, nil
+}
+
+// Registry returns the list of registered provisioners.
+func Registry() []Provisioner {
+	registry := make([]Provisioner, 0, len(provisioners))
+	for _, p := range provisioners {
+		registry = append(registry, p)
+	}
+	return registry
 }
 
 type Error struct {

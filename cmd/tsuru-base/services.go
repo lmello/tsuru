@@ -27,8 +27,8 @@ func (s ServiceList) Info() *cmd.Info {
 	}
 }
 
-func (s ServiceList) Run(ctx *cmd.Context, client cmd.Doer) error {
-	url, err := cmd.GetUrl("/services/instances")
+func (s ServiceList) Run(ctx *cmd.Context, client *cmd.Client) error {
+	url, err := cmd.GetURL("/services/instances")
 	if err != nil {
 		return err
 	}
@@ -70,14 +70,15 @@ Will add a new instance of the "mongodb" service, named "tsuru_mongodb".`
 		Usage:   usage,
 		Desc:    "Create a service instance to one or more apps make use of.",
 		MinArgs: 2,
+		MaxArgs: 2,
 	}
 }
 
-func (sa ServiceAdd) Run(ctx *cmd.Context, client cmd.Doer) error {
+func (sa ServiceAdd) Run(ctx *cmd.Context, client *cmd.Client) error {
 	srvName, instName := ctx.Args[0], ctx.Args[1]
 	fmtBody := fmt.Sprintf(`{"name": "%s", "service_name": "%s"}`, instName, srvName)
 	b := bytes.NewBufferString(fmtBody)
-	url, err := cmd.GetUrl("/services/instances")
+	url, err := cmd.GetURL("/services/instances")
 	if err != nil {
 		return err
 	}
@@ -98,13 +99,13 @@ type ServiceBind struct {
 	GuessingCommand
 }
 
-func (sb *ServiceBind) Run(ctx *cmd.Context, client cmd.Doer) error {
+func (sb *ServiceBind) Run(ctx *cmd.Context, client *cmd.Client) error {
 	appName, err := sb.Guess()
 	if err != nil {
 		return err
 	}
 	instanceName := ctx.Args[0]
-	url, err := cmd.GetUrl("/services/instances/" + instanceName + "/" + appName)
+	url, err := cmd.GetURL("/services/instances/" + instanceName + "/" + appName)
 	if err != nil {
 		return err
 	}
@@ -155,13 +156,13 @@ type ServiceUnbind struct {
 	GuessingCommand
 }
 
-func (su *ServiceUnbind) Run(ctx *cmd.Context, client cmd.Doer) error {
+func (su *ServiceUnbind) Run(ctx *cmd.Context, client *cmd.Client) error {
 	appName, err := su.Guess()
 	if err != nil {
 		return err
 	}
 	instanceName := ctx.Args[0]
-	url, err := cmd.GetUrl("/services/instances/" + instanceName + "/" + appName)
+	url, err := cmd.GetURL("/services/instances/" + instanceName + "/" + appName)
 	if err != nil {
 		return err
 	}
@@ -211,9 +212,9 @@ e.g.:
 	}
 }
 
-func (c ServiceInstanceStatus) Run(ctx *cmd.Context, client cmd.Doer) error {
+func (c ServiceInstanceStatus) Run(ctx *cmd.Context, client *cmd.Client) error {
 	instName := ctx.Args[0]
-	url, err := cmd.GetUrl("/services/instances/" + instName + "/status")
+	url, err := cmd.GetURL("/services/instances/" + instName + "/status")
 	if err != nil {
 		return err
 	}
@@ -286,9 +287,9 @@ func (ServiceInfo) ExtraHeaders(instances []ServiceInstanceModel) []string {
 	return headers
 }
 
-func (c ServiceInfo) Run(ctx *cmd.Context, client cmd.Doer) error {
+func (c ServiceInfo) Run(ctx *cmd.Context, client *cmd.Client) error {
 	serviceName := ctx.Args[0]
-	url, err := cmd.GetUrl("/services/" + serviceName)
+	url, err := cmd.GetURL("/services/" + serviceName)
 	if err != nil {
 		return err
 	}
@@ -332,7 +333,7 @@ func (c ServiceInfo) Run(ctx *cmd.Context, client cmd.Doer) error {
 
 type ServiceDoc struct{}
 
-func (c ServiceDoc) Info() *cmd.Info {
+func (ServiceDoc) Info() *cmd.Info {
 	return &cmd.Info{
 		Name:    "service-doc",
 		Usage:   "service-doc <servicename>",
@@ -341,10 +342,10 @@ func (c ServiceDoc) Info() *cmd.Info {
 	}
 }
 
-func (c ServiceDoc) Run(ctx *cmd.Context, client cmd.Doer) error {
+func (ServiceDoc) Run(ctx *cmd.Context, client *cmd.Client) error {
 	sName := ctx.Args[0]
-	url := fmt.Sprintf("/services/c/%s/doc", sName)
-	url, err := cmd.GetUrl(url)
+	url := fmt.Sprintf("/services/%s/doc", sName)
+	url, err := cmd.GetURL(url)
 	if err != nil {
 		return err
 	}
@@ -376,10 +377,10 @@ func (c ServiceRemove) Info() *cmd.Info {
 	}
 }
 
-func (c ServiceRemove) Run(ctx *cmd.Context, client cmd.Doer) error {
+func (c ServiceRemove) Run(ctx *cmd.Context, client *cmd.Client) error {
 	name := ctx.Args[0]
-	url := fmt.Sprintf("/services/c/instances/%s", name)
-	url, err := cmd.GetUrl(url)
+	url := fmt.Sprintf("/services/instances/%s", name)
+	url, err := cmd.GetURL(url)
 	if err != nil {
 		return err
 	}

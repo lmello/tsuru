@@ -141,7 +141,7 @@ func (s *S) TestOpenRepository(c *gocheck.C) {
 	}
 }
 
-func (s *S) TestGetRemoteUrl(c *gocheck.C) {
+func (s *S) TestGetRemoteURL(c *gocheck.C) {
 	var data = []struct {
 		name     string
 		expected string
@@ -154,17 +154,17 @@ func (s *S) TestGetRemoteUrl(c *gocheck.C) {
 	repo, err := OpenRepository(s.repoPath)
 	c.Assert(err, gocheck.IsNil)
 	for _, d := range data {
-		got, err := repo.GetRemoteUrl(d.name)
+		got, err := repo.RemoteURL(d.name)
 		if got != d.expected {
-			c.Errorf("GetRemoteUrl(%q): Want %q. Got %q.", d.name, d.expected, got)
+			c.Errorf("RemoteURL(%q): Want %q. Got %q.", d.name, d.expected, got)
 		}
 		if !reflect.DeepEqual(d.err, err) {
-			c.Errorf("GetRemoteUrl(%q): Want error %q. Got %q.", d.name, d.err, err)
+			c.Errorf("RemoteURL(%q): Want error %q. Got %q.", d.name, d.err, err)
 		}
 	}
 }
 
-func BenchmarkGetRemoteUrl(b *testing.B) {
+func BenchmarkGetRemoteURL(b *testing.B) {
 	tmpdir, err := filepath.EvalSymlinks(os.TempDir())
 	if err != nil {
 		b.Fatal(err)
@@ -186,7 +186,7 @@ func BenchmarkGetRemoteUrl(b *testing.B) {
 	}
 	for i := 0; i < b.N; i++ {
 		repo, _ := OpenRepository(repoPath)
-		repo.GetRemoteUrl("origin")
-		repo.GetRemoteUrl("tsuru")
+		repo.RemoteURL("origin")
+		repo.RemoteURL("tsuru")
 	}
 }

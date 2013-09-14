@@ -46,7 +46,7 @@ func (w *jsonWriter) Write(b []byte) (int, error) {
 		return len(b), nil
 	}
 	for _, l := range logs {
-		date := l.Date.Format("2006-01-02 15:04:05 -0700")
+		date := l.Date.In(time.Local).Format("2006-01-02 15:04:05 -0700")
 		prefix := fmt.Sprintf("%s [%s]:", date, l.Source)
 		fmt.Fprintf(w.w, "%s %s\n", cmd.Colorfy(prefix, "blue", "", ""), l.Message)
 	}
@@ -60,12 +60,12 @@ type log struct {
 	Source  string
 }
 
-func (c *AppLog) Run(context *cmd.Context, client cmd.Doer) error {
+func (c *AppLog) Run(context *cmd.Context, client *cmd.Client) error {
 	appName, err := c.Guess()
 	if err != nil {
 		return err
 	}
-	url, err := cmd.GetUrl(fmt.Sprintf("/apps/%s/log?lines=%d", appName, c.lines))
+	url, err := cmd.GetURL(fmt.Sprintf("/apps/%s/log?lines=%d", appName, c.lines))
 	if err != nil {
 		return err
 	}

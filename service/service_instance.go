@@ -12,8 +12,18 @@ import (
 	"github.com/globocom/tsuru/db"
 	"github.com/globocom/tsuru/errors"
 	"github.com/globocom/tsuru/log"
+	"github.com/globocom/tsuru/rec"
 	"labix.org/v2/mgo/bson"
 	"net/http"
+	"regexp"
+)
+
+var (
+	ErrServiceInstanceNotFound = stderrors.New("Service instance not found")
+	ErrInvalidInstanceName     = stderrors.New("Invalid service instance name")
+	ErrAccessNotAllowed        = stderrors.New("User does not have access to this service instance")
+
+	instanceNameRegexp = regexp.MustCompile(`^[A-Za-z][-a-zA-Z0-9_]+$`)
 )
 
 type ServiceInstance struct {
@@ -21,18 +31,6 @@ type ServiceInstance struct {
 	ServiceName string `bson:"service_name"`
 	Apps        []string
 	Teams       []string
-}
-
-// GetInstance gets the service instance by name from database.
-func GetInstance(name string) (ServiceInstance, error) {
-	conn, err := db.Conn()
-	if err != nil {
-		return ServiceInstance{}, err
-	}
-	defer conn.Close()
-	var si ServiceInstance
-	err = conn.ServiceInstances().Find(bson.M{"name": name}).One(&si)
-	return si, err
 }
 
 // DeleteInstance deletes the service instance from the database.
@@ -51,24 +49,6 @@ func DeleteInstance(si *ServiceInstance) error {
 	}
 	defer conn.Close()
 	return conn.ServiceInstances().Remove(bson.M{"name": si.Name})
-}
-
-// CreateInstance store a service instance into the database.
-func CreateInstance(si *ServiceInstance) error {
-	endpoint, err := si.Service().getClient("production")
-	if err != nil {
-		return err
-	}
-	err = endpoint.Create(si)
-	if err != nil {
-		return err
-	}
-	conn, err := db.Conn()
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	return conn.ServiceInstances().Insert(si)
 }
 
 // MarshalJSON marshals the ServiceName in json format.
@@ -167,14 +147,14 @@ func (si *ServiceInstance) update() error {
 func (si *ServiceInstance) BindApp(app bind.App) error {
 	err := si.AddApp(app.GetName())
 	if err != nil {
-		return &errors.Http{Code: http.StatusConflict, Message: "This app is already bound to this service instance."}
+		return &errors.HTTP{Code: http.StatusConflict, Message: "This app is already bound to this service instance."}
 	}
 	err = si.update()
 	if err != nil {
 		return err
 	}
 	if len(app.GetUnits()) == 0 {
-		return &errors.Http{Code: http.StatusPreconditionFailed, Message: "This app does not have an IP yet."}
+		return &errors.HTTP{Code: http.StatusPreconditionFailed, Message: "This app does not have an IP yet."}
 	}
 	envsChan := make(chan map[string]string, len(app.GetUnits())+1)
 	errChan := make(chan error, len(app.GetUnits())+1)
@@ -218,7 +198,7 @@ func (si *ServiceInstance) BindUnit(app bind.App, unit bind.Unit) (map[string]st
 func (si *ServiceInstance) UnbindApp(app bind.App) error {
 	err := si.RemoveApp(app.GetName())
 	if err != nil {
-		return &errors.Http{Code: http.StatusPreconditionFailed, Message: "This app is not bound to this service instance."}
+		return &errors.HTTP{Code: http.StatusPreconditionFailed, Message: "This app is not bound to this service instance."}
 	}
 	err = si.update()
 	if err != nil {
@@ -270,6 +250,46 @@ func genericServiceInstancesFilter(services interface{}, teams []string) (q, f b
 	return
 }
 
+func CreateServiceInstance(name string, service *Service, user *auth.User) error {
+	if !instanceNameRegexp.MatchString(name) {
+		return ErrInvalidInstanceName
+	}
+	instance := ServiceInstance{
+		Name:        name,
+		ServiceName: service.Name,
+	}
+	teams, err := user.Teams()
+	if err != nil {
+		return err
+	}
+	instance.Teams = make([]string, 0, len(teams))
+	for _, team := range teams {
+		if service.HasTeam(&team) || !service.IsRestricted {
+			instance.Teams = append(instance.Teams, team.Name)
+		}
+	}
+	endpoint, err := service.getClient("production")
+	if err != nil {
+		return err
+	}
+	err = endpoint.Create(&instance)
+	if err != nil {
+		return err
+	}
+	conn, err := db.Conn()
+	if err != nil {
+		endpoint.Destroy(&instance)
+		return err
+	}
+	defer conn.Close()
+	err = conn.ServiceInstances().Insert(instance)
+	if err != nil {
+		endpoint.Destroy(&instance)
+		return err
+	}
+	return nil
+}
+
 func GetServiceInstancesByServices(services []Service) ([]ServiceInstance, error) {
 	var instances []ServiceInstance
 	conn, err := db.Conn()
@@ -300,4 +320,22 @@ func GetServiceInstancesByServicesAndTeams(services []Service, u *auth.User) ([]
 	q, f := genericServiceInstancesFilter(services, auth.GetTeamsNames(teams))
 	err = conn.ServiceInstances().Find(q).Select(f).All(&instances)
 	return instances, err
+}
+
+func GetServiceInstance(name string, u *auth.User) (*ServiceInstance, error) {
+	conn, err := db.Conn()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	rec.Log(u.Email, "get-service-instance", name)
+	var instance ServiceInstance
+	err = conn.ServiceInstances().Find(bson.M{"name": name}).One(&instance)
+	if err != nil {
+		return nil, ErrServiceInstanceNotFound
+	}
+	if !auth.CheckUserAccess(instance.Teams, u) {
+		return nil, ErrAccessNotAllowed
+	}
+	return &instance, nil
 }

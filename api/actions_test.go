@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-package main
+package api
 
 import (
 	"fmt"
@@ -14,8 +14,6 @@ import (
 	"launchpad.net/gocheck"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
-	"strings"
 )
 
 type ActionsSuite struct {
@@ -28,7 +26,6 @@ func (s *ActionsSuite) SetUpSuite(c *gocheck.C) {
 	config.Set("database:url", "127.0.0.1:27017")
 	config.Set("database:name", "tsuru_api_actions_test")
 	config.Set("auth:salt", "tsuru-salt")
-	config.Set("auth:token-key", "TSURU-SALT")
 	var err error
 	s.conn, err = db.Conn()
 	c.Assert(err, gocheck.IsNil)
@@ -42,16 +39,24 @@ func (s *ActionsSuite) TearDownSuite(c *gocheck.C) {
 
 func (s *ActionsSuite) startGandalfTestServer(h http.Handler) *httptest.Server {
 	ts := httptest.NewServer(h)
-	pieces := strings.Split(ts.URL, "://")
-	protocol := pieces[0]
-	hostPart := strings.Split(pieces[1], ":")
-	port := hostPart[1]
-	host := hostPart[0]
-	config.Set("git:host", host)
-	portInt, _ := strconv.ParseInt(port, 10, 0)
-	config.Set("git:port", portInt)
-	config.Set("git:protocol", protocol)
+	config.Set("git:api-server", ts.URL)
 	return ts
+}
+
+func (s *ActionsSuite) TestAddKeyInGandalf(c *gocheck.C) {
+	c.Assert(addKeyInGandalfAction.Name, gocheck.Equals, "add-key-in-gandalf")
+}
+
+func (s *ActionsSuite) TestAddKeyInDatatabase(c *gocheck.C) {
+	c.Assert(addKeyInDatabaseAction.Name, gocheck.Equals, "add-key-in-database")
+}
+
+func (s *ActionsSuite) TestAddUserToTeamInGandalf(c *gocheck.C) {
+	c.Assert(addUserToTeamInGandalfAction.Name, gocheck.Equals, "add-user-to-team-in-gandalf")
+}
+
+func (s *ActionsSuite) TestAddUserToTeamInDatabase(c *gocheck.C) {
+	c.Assert(addUserToTeamInDatabaseAction.Name, gocheck.Equals, "add-user-to-team-in-database")
 }
 
 func (s *ActionsSuite) TestAddKeyInGandalfActionForward(c *gocheck.C) {

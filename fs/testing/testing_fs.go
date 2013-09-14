@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
-// Package fs/testing provides fake implementations of the fs package.
+// Package testing provides fake implementations of the fs package.
 //
 // These implementations can be used to mock out the file system in tests.
 package testing
@@ -10,8 +10,12 @@ package testing
 import (
 	"fmt"
 	"github.com/globocom/tsuru/fs"
+	"github.com/globocom/tsuru/safe"
 	"os"
+	"path"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 )
 
@@ -24,37 +28,57 @@ import (
 type FakeFile struct {
 	content string
 	current int64
-	r       *strings.Reader
+	r       *safe.Reader
+	f       *os.File
 }
 
-func (f *FakeFile) reader() *strings.Reader {
+func (f *FakeFile) reader() *safe.Reader {
 	if f.r == nil {
-		f.r = strings.NewReader(f.content)
+		f.r = safe.NewReader([]byte(f.content))
 	}
 	return f.r
 }
 
 func (f *FakeFile) Close() error {
-	f.current = 0
+	atomic.StoreInt64(&f.current, 0)
+	if f.f != nil {
+		f.f.Close()
+		f.f = nil
+	}
 	return nil
 }
 
 func (f *FakeFile) Read(p []byte) (n int, err error) {
 	n, err = f.reader().Read(p)
-	f.current += int64(n)
+	atomic.AddInt64(&f.current, int64(n))
 	return
 }
 
 func (f *FakeFile) ReadAt(p []byte, off int64) (n int, err error) {
 	n, err = f.reader().ReadAt(p, off)
-	f.current += off + int64(n)
+	atomic.AddInt64(&f.current, off+int64(n))
 	return
 }
 
 func (f *FakeFile) Seek(offset int64, whence int) (int64, error) {
-	var err error
-	f.current, err = f.reader().Seek(offset, whence)
-	return f.current, err
+	ncurrent, err := f.reader().Seek(offset, whence)
+	old := atomic.LoadInt64(&f.current)
+	for !atomic.CompareAndSwapInt64(&f.current, old, ncurrent) {
+		old = atomic.LoadInt64(&f.current)
+	}
+	return ncurrent, err
+}
+
+func (f *FakeFile) Fd() uintptr {
+	if f.f == nil {
+		var err error
+		p := path.Join(os.TempDir(), "testing-fs-file.txt")
+		f.f, err = os.Create(p)
+		if err != nil {
+			panic(err)
+		}
+	}
+	return f.f.Fd()
 }
 
 func (f *FakeFile) Stat() (fi os.FileInfo, err error) {
@@ -63,14 +87,18 @@ func (f *FakeFile) Stat() (fi os.FileInfo, err error) {
 
 func (f *FakeFile) Write(p []byte) (n int, err error) {
 	n = len(p)
-	f.content = f.content[:f.current] + string(p)
+	cur := atomic.LoadInt64(&f.current)
+	diff := cur - int64(len(f.content))
+	if diff > 0 {
+		f.content += strings.Repeat("\x00", int(diff)) + string(p)
+	} else {
+		f.content = f.content[:cur] + string(p)
+	}
 	return
 }
 
 func (f *FakeFile) WriteString(s string) (ret int, err error) {
-	ret = len(s)
-	f.content = s
-	return
+	return f.Write([]byte(s))
 }
 
 func (f *FakeFile) Truncate(size int64) error {
@@ -85,8 +113,11 @@ func (f *FakeFile) Truncate(size int64) error {
 //
 // All methods from RecordingFs never return errors.
 type RecordingFs struct {
-	actions []string
-	files   map[string]*FakeFile
+	actions      []string
+	actionsMutex sync.Mutex
+
+	files      map[string]*FakeFile
+	filesMutex sync.Mutex
 
 	// FileContent is used to provide content for files opened using
 	// RecordingFs.
@@ -102,6 +133,8 @@ type RecordingFs struct {
 //     rfs.Open("/tmp/file.txt")
 //     rfs.HasAction("open /tmp/file.txt") // true
 func (r *RecordingFs) HasAction(action string) bool {
+	r.actionsMutex.Lock()
+	defer r.actionsMutex.Unlock()
 	for _, a := range r.actions {
 		if action == a {
 			return true
@@ -111,6 +144,8 @@ func (r *RecordingFs) HasAction(action string) bool {
 }
 
 func (r *RecordingFs) open(name string, read bool) (fs.File, error) {
+	r.filesMutex.Lock()
+	defer r.filesMutex.Unlock()
 	if r.files == nil {
 		r.files = make(map[string]*FakeFile)
 		if r.FileContent == "" && read {
@@ -130,12 +165,16 @@ func (r *RecordingFs) open(name string, read bool) (fs.File, error) {
 // Create records the action "create <name>" and returns an instance of
 // FakeFile and nil error.
 func (r *RecordingFs) Create(name string) (fs.File, error) {
+	r.actionsMutex.Lock()
 	r.actions = append(r.actions, "create "+name)
+	r.actionsMutex.Unlock()
 	return r.open(name, false)
 }
 
 // Mkdir records the action "mkdir <name> with mode <perm>" and returns nil.
 func (r *RecordingFs) Mkdir(name string, perm os.FileMode) error {
+	r.actionsMutex.Lock()
+	defer r.actionsMutex.Unlock()
 	r.actions = append(r.actions, fmt.Sprintf("mkdir %s with mode %#o", name, perm))
 	return nil
 }
@@ -143,6 +182,8 @@ func (r *RecordingFs) Mkdir(name string, perm os.FileMode) error {
 // MkdirAll records the action "mkdirall <path> with mode <perm>" and returns
 // nil.
 func (r *RecordingFs) MkdirAll(path string, perm os.FileMode) error {
+	r.actionsMutex.Lock()
+	defer r.actionsMutex.Unlock()
 	r.actions = append(r.actions, fmt.Sprintf("mkdirall %s with mode %#o", path, perm))
 	return nil
 }
@@ -150,27 +191,38 @@ func (r *RecordingFs) MkdirAll(path string, perm os.FileMode) error {
 // Open records the action "open <name>" and returns an instance of FakeFile
 // and nil error.
 func (r *RecordingFs) Open(name string) (fs.File, error) {
+	r.actionsMutex.Lock()
 	r.actions = append(r.actions, "open "+name)
+	r.actionsMutex.Unlock()
 	return r.open(name, true)
 }
 
 // OpenFile records the action "openfile <name> with mode <perm>" and returns
 // an instance of FakeFile and nil error.
 func (r *RecordingFs) OpenFile(name string, flag int, perm os.FileMode) (fs.File, error) {
+	r.actionsMutex.Lock()
 	r.actions = append(r.actions, fmt.Sprintf("openfile %s with mode %#o", name, perm))
+	r.actionsMutex.Unlock()
+	if flag&os.O_EXCL == os.O_EXCL && flag&os.O_CREATE == os.O_CREATE {
+		return nil, syscall.EALREADY
+	}
 	read := flag&syscall.O_CREAT != syscall.O_CREAT &&
 		flag&syscall.O_APPEND != syscall.O_APPEND &&
-		flag&syscall.O_RDWR != syscall.O_RDWR &&
 		flag&syscall.O_TRUNC != syscall.O_TRUNC &&
 		flag&syscall.O_WRONLY != syscall.O_WRONLY
 	f, err := r.open(name, read)
 	if flag&syscall.O_TRUNC == syscall.O_TRUNC {
 		f.Truncate(0)
 	}
+	if flag&syscall.O_APPEND == syscall.O_APPEND {
+		f.Seek(0, 2)
+	}
 	return f, err
 }
 
 func (r *RecordingFs) deleteFile(name string) {
+	r.filesMutex.Lock()
+	defer r.filesMutex.Unlock()
 	if r.files != nil {
 		delete(r.files, name)
 	}
@@ -178,20 +230,41 @@ func (r *RecordingFs) deleteFile(name string) {
 
 // Remove records the action "remove <name>" and returns nil.
 func (r *RecordingFs) Remove(name string) error {
+	r.actionsMutex.Lock()
 	r.actions = append(r.actions, "remove "+name)
+	r.actionsMutex.Unlock()
 	r.deleteFile(name)
 	return nil
 }
 
 // RemoveAll records the action "removeall <path>" and returns nil.
 func (r *RecordingFs) RemoveAll(path string) error {
+	r.actionsMutex.Lock()
 	r.actions = append(r.actions, "removeall "+path)
+	r.actionsMutex.Unlock()
 	r.deleteFile(path)
+	return nil
+}
+
+// Rename records the action "rename <old> <new>" and returns nil.
+func (r *RecordingFs) Rename(oldname, newname string) error {
+	r.actionsMutex.Lock()
+	r.actions = append(r.actions, "rename "+oldname+" "+newname)
+	r.actionsMutex.Unlock()
+	r.filesMutex.Lock()
+	defer r.filesMutex.Unlock()
+	if r.files == nil {
+		r.files = make(map[string]*FakeFile)
+	}
+	r.files[newname] = r.files[oldname]
+	delete(r.files, oldname)
 	return nil
 }
 
 // Stat records the action "stat <name>" and returns nil, nil.
 func (r *RecordingFs) Stat(name string) (os.FileInfo, error) {
+	r.actionsMutex.Lock()
+	defer r.actionsMutex.Unlock()
 	r.actions = append(r.actions, "stat "+name)
 	return nil, nil
 }

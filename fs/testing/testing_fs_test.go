@@ -6,8 +6,10 @@ package testing
 
 import (
 	"github.com/globocom/tsuru/fs"
+	"io/ioutil"
 	"launchpad.net/gocheck"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -30,6 +32,14 @@ func (s *S) TestFakeFileClose(c *gocheck.C) {
 	err := f.Close()
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(f.current, gocheck.Equals, int64(0))
+}
+
+func (s *S) TestFakeFileCloseInternalFilePointer(c *gocheck.C) {
+	f := &FakeFile{}
+	f.Fd()
+	c.Assert(f.f, gocheck.NotNil)
+	f.Close()
+	c.Assert(f.f, gocheck.IsNil)
 }
 
 func (s *S) TestFakeFileRead(c *gocheck.C) {
@@ -65,6 +75,13 @@ func (s *S) TestFakeFileSeek(c *gocheck.C) {
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(read, gocheck.Equals, 5)
 	c.Assert(string(buf), gocheck.Equals, "equal")
+}
+
+func (s *S) TestFakeFileFd(c *gocheck.C) {
+	f := &FakeFile{}
+	defer f.Close()
+	fd := f.Fd()
+	c.Assert(fd, gocheck.Equals, f.f.Fd())
 }
 
 func (s *S) TestFakeFileStat(c *gocheck.C) {
@@ -103,14 +120,21 @@ func (s *S) TestFakeFileWriteString(c *gocheck.C) {
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(ret, gocheck.Equals, len("break"))
 	c.Assert(f.content, gocheck.Equals, "break")
+	f.current = int64(ret)
+	ret, err = f.WriteString("break")
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(ret, gocheck.Equals, len("break"))
+	c.Assert(f.content, gocheck.Equals, "breakbreak")
 }
 
-func (s *S) TestFakeFileTruncateSetsCurrentToZero(c *gocheck.C) {
+func (s *S) TestFakeFileTruncateDoesNotChangeCurrent(c *gocheck.C) {
 	content := "Guardian"
 	f := &FakeFile{content: content}
+	f.current = 4
+	cur := f.current
 	err := f.Truncate(0)
 	c.Assert(err, gocheck.IsNil)
-	c.Assert(f.current, gocheck.Equals, int64(0))
+	c.Assert(f.current, gocheck.Equals, cur)
 }
 
 func (s *S) TestFakeFileTruncateStripsContentWithN(c *gocheck.C) {
@@ -119,6 +143,20 @@ func (s *S) TestFakeFileTruncateStripsContentWithN(c *gocheck.C) {
 	err := f.Truncate(4)
 	c.Assert(err, gocheck.IsNil)
 	c.Assert(f.content, gocheck.Equals, "Guar")
+}
+
+func (s *S) TestFakeFileTruncateWithoutSeek(c *gocheck.C) {
+	content := "Guardian"
+	f := &FakeFile{content: content}
+	f.current = int64(len(content))
+	err := f.Truncate(0)
+	c.Assert(err, gocheck.IsNil)
+	tow := []byte("otherthing")
+	n, err := f.Write(tow)
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(n, gocheck.Equals, len(tow))
+	nulls := strings.Repeat("\x00", int(f.current))
+	c.Assert(f.content, gocheck.Equals, nulls+string(tow))
 }
 
 func (s *S) TestRecordingFsPointerShouldImplementFsInterface(c *gocheck.C) {
@@ -179,6 +217,38 @@ func (s *S) TestRecordingFsOpenFileTruncate(c *gocheck.C) {
 	c.Assert(fs.HasAction("openfile /my/file with mode 0600"), gocheck.Equals, true)
 	c.Assert(f, gocheck.FitsTypeOf, &FakeFile{})
 	c.Assert(f.(*FakeFile).content, gocheck.Equals, "")
+}
+
+func (s *S) TestRecordingFsOpenFileAppend(c *gocheck.C) {
+	fs := RecordingFs{}
+	f, err := fs.OpenFile("/my/file", syscall.O_APPEND|syscall.O_WRONLY, 0644)
+	c.Assert(err, gocheck.IsNil)
+	f.Write([]byte("Hi there!\n"))
+	f.Close()
+	f, err = fs.OpenFile("/my/file", syscall.O_APPEND|syscall.O_WRONLY, 0644)
+	c.Assert(err, gocheck.IsNil)
+	f.Write([]byte("Hi there!\n"))
+	f.Close()
+	f, err = fs.Open("/my/file")
+	c.Assert(err, gocheck.IsNil)
+	defer f.Close()
+	b, err := ioutil.ReadAll(f)
+	c.Assert(err, gocheck.IsNil)
+	c.Assert(string(b), gocheck.Equals, "Hi there!\nHi there!\n")
+}
+
+func (s *S) TestRecordingFsOpenFileCreateAndExclusive(c *gocheck.C) {
+	fs := RecordingFs{}
+	f, err := fs.OpenFile("/my/file", os.O_EXCL|os.O_CREATE, 0600)
+	c.Assert(err, gocheck.Equals, syscall.EALREADY)
+	c.Assert(f, gocheck.IsNil)
+}
+
+func (s *S) TestRecordingFsOpenFileReadAndWriteENOENT(c *gocheck.C) {
+	fs := RecordingFs{}
+	f, err := fs.OpenFile("/my/file", syscall.O_RDWR, 0600)
+	c.Assert(f, gocheck.IsNil)
+	c.Assert(err, gocheck.Equals, syscall.ENOENT)
 }
 
 func (s *S) TestRecordingFsKeepFileInstances(c *gocheck.C) {
@@ -258,6 +328,29 @@ func (s *S) TestRecordingFsRemoveAllDeletesState(c *gocheck.C) {
 	buf := make([]byte, 2)
 	f.Read(buf)
 	c.Assert(string(buf), gocheck.Equals, "hi")
+}
+
+func (s *S) TestRecordingFsRename(c *gocheck.C) {
+	fs := RecordingFs{}
+	f, _ := fs.Create("/my/file")
+	f.Write([]byte("hello, hello!"))
+	f.Close()
+	err := fs.Rename("/my/file", "/your/file")
+	c.Assert(err, gocheck.IsNil)
+	_, err = fs.Open("/my/file")
+	c.Assert(err, gocheck.NotNil)
+	f, err = fs.Open("/your/file")
+	c.Assert(err, gocheck.IsNil)
+	defer f.Close()
+	b, _ := ioutil.ReadAll(f)
+	c.Assert(string(b), gocheck.Equals, "hello, hello!")
+	c.Assert(fs.HasAction("rename /my/file /your/file"), gocheck.Equals, true)
+}
+
+func (s *S) TestRecordingFsCold(c *gocheck.C) {
+	fs := RecordingFs{}
+	err := fs.Rename("/my/file", "/your/file")
+	c.Assert(err, gocheck.IsNil)
 }
 
 func (s *S) TestRecordingFsStat(c *gocheck.C) {

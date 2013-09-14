@@ -60,18 +60,19 @@ Install the latest version, by doing this:
 
     $ brew install beanstalkd
 
-libyaml
-=======
+Installing Redis
+================
 
-To install libyaml you can use your package installer:
+One of Tsuru routing providers uses `Redis <http://redis.io>`_ to store
+information about frontends and backends. You will also need to install it:
 
 .. highlight:: bash
 
 ::
 
-    $ sudo apt-get install libyaml-dev
+    $ sudo apt-get install -y redis-server
 
-    $ brew install libyaml
+    $ brew install redis
 
 Installing git, bzr and mercurial
 =================================
@@ -135,6 +136,20 @@ If you have already cloned the repository, just move the cloned directory to
 
 For more details on GOPATH, please check this url:
 http://golang.org/cmd/go/#GOPATH_environment_variable
+
+Starting Redis, Beanstalkd and MongoDB
+======================================
+
+Before building the code and running the tests, execute the following commands 
+to start Redis, Beanstalkd and MongoDB processes.
+
+.. highlight:: bash
+
+::
+
+    $ redis-server
+    $ mongod
+    $ beanstalkd -l 127.0.0.1
 
 Installing tsuru dependencies and running tests
 ===============================================

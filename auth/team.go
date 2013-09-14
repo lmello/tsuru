@@ -5,16 +5,27 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
 	"github.com/globocom/tsuru/db"
 	"github.com/globocom/tsuru/log"
+	"labix.org/v2/mgo"
 	"labix.org/v2/mgo/bson"
+	"regexp"
+	"strings"
 	"sync"
 )
 
+var (
+	ErrInvalidTeamName   = errors.New("Invalid team name")
+	ErrTeamAlreadyExists = errors.New("Team already exists")
+
+	teamNameRegexp = regexp.MustCompile(`^[a-zA-Z][-@_.+\w\s]+$`)
+)
+
 type Team struct {
-	Name  string `bson:"_id"`
-	Users []string
+	Name  string   `bson:"_id" json:"name"`
+	Users []string `json:"users"`
 }
 
 func (t *Team) ContainsUser(u *User) bool {
@@ -50,6 +61,47 @@ func (t *Team) RemoveUser(u *User) error {
 	return nil
 }
 
+func CreateTeam(name string, user ...*User) error {
+	name = strings.TrimSpace(name)
+	if !isTeamNameValid(name) {
+		return ErrInvalidTeamName
+	}
+	team := Team{
+		Name:  name,
+		Users: make([]string, len(user)),
+	}
+	for i, u := range user {
+		team.Users[i] = u.Email
+	}
+	conn, err := db.Conn()
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	err = conn.Teams().Insert(team)
+	if mgo.IsDup(err) {
+		return ErrTeamAlreadyExists
+	}
+	return err
+}
+
+func isTeamNameValid(name string) bool {
+	return teamNameRegexp.MatchString(name)
+}
+
+func GetTeam(name string) (*Team, error) {
+	var t Team
+	conn, err := db.Conn()
+	if err != nil {
+		return nil, err
+	}
+	err = conn.Teams().FindId(name).One(&t)
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
 func GetTeamsNames(teams []Team) []string {
 	tn := make([]string, len(teams))
 	for i, t := range teams {
@@ -69,7 +121,7 @@ func CheckUserAccess(teamNames []string, u *User) bool {
 	defer conn.Close()
 	conn.Teams().Find(q).All(&teams)
 	var wg sync.WaitGroup
-	found := make(chan bool)
+	found := make(chan bool, len(teams)+1)
 	for _, team := range teams {
 		wg.Add(1)
 		go func(t Team) {
